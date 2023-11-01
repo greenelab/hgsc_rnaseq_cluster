@@ -1,0 +1,204 @@
+recreate_figs_1\_2
+================
+Natalie Davidson
+8/15/2021
+
+# Recreate Figure 2 – NMF vs KMeans
+
+Figure 1 shows consistency of clustering approach across datasets. So
+here we want to compare consistency between methods for EACH dataset. We
+will be comparing NMF vs Kmeans.
+
+## First get file paths
+
+``` r
+fig2_kmeans_dir = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Tables-DScores/")
+fig2_kmeans_files = list.files(fig2_kmeans_dir,full.names = T )
+
+fig2_nmf_dir = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Figures-nmf-DscoreVectors/")
+fig2_nmf_files = list.files(fig2_nmf_dir,full.names = T )
+```
+
+## Plotting method + correlation calculation methods
+
+``` r
+plot_nmf_v_kmeans_internal <- function(cor_df, cluster_compare, method_title){
+        
+    list_plots = vector('list', length(cluster_compare))
+    
+    in_idx = 1
+    for(curr_k in cluster_compare){
+        
+        # get the comparisons of interest
+        col_idx = grep(curr_k, colnames(cor_df))
+        row_idx = grep(curr_k, rownames(cor_df))
+        
+        curr_df = cor_df[row_idx, col_idx]
+        colnames(curr_df) = 1:ncol(curr_df)
+        curr_df$compare_samp = row.names(curr_df) 
+
+        
+        # plot the correlation matrix as a heatmap
+        gg_out = ggplot(data = melt(curr_df)) + geom_tile(aes(x=variable,y=compare_samp, fill = value)) +
+                        scale_fill_gradient2(low="blue", mid="white", high="red", 
+                                            midpoint=0,    
+                                            breaks=seq(-1,1,0.1), 
+                                            limits=c(-1, 1)) + 
+                        geom_text(aes(x=variable,y=compare_samp, label=round(value, 2))) + 
+                        theme_bw() + labs(x = "NMF", y="K-Means") +
+                        theme(legend.position = "none", 
+                                axis.text.x=element_blank(),
+                                axis.ticks.x=element_blank(),
+                                axis.text.y=element_blank(),
+                                axis.ticks.y=element_blank(),
+                                plot.title = element_text(size = 20, hjust = 0.5))
+        # since we make several plot stacked along a horizontal line, 
+        # only keep the y-axis title of the first one
+        if(in_idx != 1){
+            gg_out = gg_out + theme(axis.title.y=element_blank())
+        }
+        
+        # add the method title
+        gg_out = gg_out + ggtitle(" ")
+        if(in_idx == 2){
+            gg_out = gg_out + ggtitle(method_title)
+        }
+        list_plots[[in_idx]] = gg_out
+        in_idx = in_idx +1 
+
+    }
+
+    cluster_plot = do.call(ggarrange, 
+                            c(list_plots, 
+                                ncol=length(cluster_compare),
+                                nrow=1))
+
+    return(cluster_plot)
+}
+
+
+plot_nmf_v_kmeans <- function(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title){
+    
+    curr_kmeans_file = fig2_kmeans_files[dataset_idx]
+    curr_nmf_file = fig2_nmf_files[dataset_idx]
+    
+    kmeans_df = data.frame(fread(curr_kmeans_file))
+    row.names(kmeans_df) = kmeans_df$V1
+    kmeans_df = kmeans_df[,-1]
+    
+    nmf_df = data.frame(fread(curr_nmf_file))
+    row.names(nmf_df) = nmf_df$V1
+    nmf_df = nmf_df[,-1]
+    
+    stopifnot(all(colnames(kmeans_df) == colnames(nmf_df)))
+    
+    colnames(nmf_df) = paste(colnames(nmf_df), "NMF", sep="_")
+    cor_df = data.frame(cor(kmeans_df, nmf_df))
+    
+    dataset_plot = plot_nmf_v_kmeans_internal(cor_df, cluster_compare, method_title)
+    return(dataset_plot)
+    
+}
+```
+
+## Now plot NMF vs. Kmeans for each dataset
+
+### Schildkraut AA RNA-Seq
+
+``` r
+dataset_id = "aaces.rnaseq"
+dataset_idx = 2
+cluster_compare = c("ClusterK2", "ClusterK3", "ClusterK4")
+method_title = "Schildkraut B"
+aaces_plot = plot_nmf_v_kmeans(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title)
+aaces_plot = aaces_plot + ggtitle("Schildkraut B")
+
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/schildkraut_AA_all_kmeans_v_nmf.pdf")
+ggsave(outfile,
+       aaces_plot, width = 9, height = 3, units = "in", device = "pdf")
+```
+
+### Schildkraut W RNA-Seq
+
+``` r
+dataset_id = "aaces.white.rnaseq"
+dataset_idx = 3
+cluster_compare = c("ClusterK2", "ClusterK3", "ClusterK4")
+method_title = "Schildkraut W"
+aaces_plot = plot_nmf_v_kmeans(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title)
+aaces_plot = aaces_plot + ggtitle("Schildkraut White")
+
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/schildkraut_W_all_kmeans_v_nmf.pdf")
+ggsave(outfile,
+       aaces_plot, width = 9, height = 3, units = "in", device = "pdf")
+```
+
+### GSE32062.GPL6480 RNA-Seq
+
+``` r
+dataset_id = "GSE32062.GPL6480"
+dataset_idx = 5
+cluster_compare = c("ClusterK2", "ClusterK3", "ClusterK4")
+
+method_title = "Yoshihara"
+dataset_plot = plot_nmf_v_kmeans(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title)
+
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/yoshihara_all_kmeans_v_nmf.pdf")
+ggsave(outfile,
+       dataset_plot, width = 9, height = 3, units = "in", device = "pdf")
+```
+
+### GSE9891 RNA-Seq
+
+``` r
+dataset_id = "GSE9891"
+dataset_idx = 6
+cluster_compare = c("ClusterK2", "ClusterK3", "ClusterK4")
+
+method_title = "Tothill"
+dataset_plot = plot_nmf_v_kmeans(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title)
+
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/tothill_all_kmeans_v_nmf.pdf")
+ggsave(outfile,
+       dataset_plot, width = 9, height = 3, units = "in", device = "pdf")
+```
+
+### mayo RNA-Seq
+
+``` r
+dataset_id = "mayo"
+dataset_idx = 7
+cluster_compare = c("ClusterK2", "ClusterK3", "ClusterK4")
+
+
+method_title = "Mayo"
+dataset_plot = plot_nmf_v_kmeans(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title)
+
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/mayo_all_kmeans_v_nmf.pdf")
+ggsave(outfile,
+       dataset_plot, width = 9, height = 3, units = "in", device = "pdf")
+```
+
+### TCGA RNA-Seq
+
+``` r
+dataset_id = "TCGA"
+dataset_idx = 8
+cluster_compare = c("ClusterK2", "ClusterK3", "ClusterK4")
+
+
+method_title = "TCGA"
+dataset_plot = plot_nmf_v_kmeans(fig2_kmeans_files, fig2_nmf_files, dataset_id, dataset_idx, cluster_compare, method_title)
+
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/tcga_all_kmeans_v_nmf.pdf")
+ggsave(outfile,
+       dataset_plot, width = 9, height = 3, units = "in", device = "pdf")
+```

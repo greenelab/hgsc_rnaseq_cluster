@@ -1,0 +1,174 @@
+---
+title: "compare_pipeline_filters_sankey"
+author: "Natalie Davidson"
+date: "9/08/2021"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("networkD3")
+require("dplyr")
+theme_set(theme_pubr())
+
+proj_dir = here()
+
+set.seed(5)
+
+```
+# Make Sankey Diagram
+
+Show how clusters are broken up across datasets
+
+## First get file paths
+
+```{r get_sankey_file, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+sankey_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+sankey_new_df = data.frame(fread(sankey_file))
+colnames(sankey_new_df)[1] = "ID"
+
+sankey_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+sankey_old_df = data.frame(fread(sankey_file))
+colnames(sankey_old_df)[1] = "ID"
+
+# write out the samples that are no longer in the new one
+neoadj_ids = setdiff(sankey_old_df$ID, sankey_new_df$ID)
+neoadj_df = subset(sankey_old_df, ID %in% neoadj_ids)
+print(table(neoadj_df$ClusterK2_kmeans))
+print(table(neoadj_df$ClusterK3_kmeans))
+print(table(neoadj_df$ClusterK4_kmeans))
+
+# only take samples that are in both
+keep_ids = intersect(sankey_new_df$ID, sankey_old_df$ID)
+sankey_new_df = subset(sankey_new_df, ID %in% keep_ids)
+sankey_old_df = subset(sankey_old_df, ID %in% keep_ids)
+
+# order them so we can directly compare
+sankey_new_df = sankey_new_df[order(sankey_new_df$ID), ]
+sankey_old_df = sankey_old_df[order(sankey_old_df$ID), ]
+stopifnot(all(sankey_new_df$ID == sankey_old_df$ID))
+
+```
+
+
+## Plotting method
+
+```{r get_sankey_fig, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+get_sankey_df <- function(sankey_old_df, sankey_new_df, dataset, k_val=2){
+    
+    old_df = subset(sankey_old_df, Dataset == dataset)
+    old_df = old_df[,c("ClusterK2_kmeans", "ClusterK3_kmeans", "ClusterK4_kmeans")]
+    old_df$ClusterK2_kmeans = paste("old_k2", old_df$ClusterK2_kmeans, sep="_")
+    old_df$ClusterK3_kmeans = paste("old_k3", old_df$ClusterK3_kmeans, sep="_")
+    old_df$ClusterK4_kmeans = paste("old_k4", old_df$ClusterK4_kmeans, sep="_")
+    
+    new_df = subset(sankey_new_df, Dataset == dataset)
+    new_df = new_df[,c("ClusterK2_kmeans", "ClusterK3_kmeans", "ClusterK4_kmeans")]
+    new_df$ClusterK2_kmeans = paste("new_k2", new_df$ClusterK2_kmeans, sep="_")
+    new_df$ClusterK3_kmeans = paste("new_k3", new_df$ClusterK3_kmeans, sep="_")
+    new_df$ClusterK4_kmeans = paste("new_k4", new_df$ClusterK4_kmeans, sep="_")
+    
+    
+    # make  pass
+    joint_df = data.frame(old=old_df[,k_val-1], new = new_df[,k_val-1])
+    flow1_df = as.data.frame(table(joint_df))
+    colnames(flow1_df) = c("source", "target", "value")
+    
+    # combine
+    links_df = flow1_df
+    
+    # make nodes
+    nodes_df <- data.frame(name=c(as.character(links_df$source), 
+                               as.character(links_df$target)) %>% unique())
+    
+    # make numeric ID
+    links_df$IDsource <- match(links_df$source, nodes_df$name)-1 
+    links_df$IDtarget <- match(links_df$target, nodes_df$name)-1
+    
+    return(list(links=links_df, nodes=nodes_df))
+    
+}
+
+plot_sankey <- function(links_df, nodes_df){
+    
+    p <- sankeyNetwork(Links = links_df, Nodes = nodes_df,
+              Source = "IDsource", Target = "IDtarget",
+              Value = "value", NodeID = "name", 
+              sinksRight=FALSE, iterations=0, fontSize = 24, width=750, height = 500)
+    
+    return(p)
+}
+
+
+```
+
+
+## Now for each dataset make the sankey plot
+
+```{r plot_tcga_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+tcga_network = get_sankey_df(sankey_old_df, sankey_new_df, dataset="TCGA", k_val=3)
+tcga_plot = plot_sankey(tcga_network[["links"]], tcga_network[["nodes"]])
+tcga_plot
+
+
+
+```
+
+```{r plot_mayo_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+mayo_network = get_sankey_df(sankey_old_df, sankey_new_df, dataset="mayo.eset", k_val=3)
+mayo_plot = plot_sankey(mayo_network[["links"]], mayo_network[["nodes"]])
+mayo_plot
+
+
+
+```
+
+```{r plot_tothill_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+tothill_network = get_sankey_df(sankey_old_df, sankey_new_df, dataset="Tothill", k_val=3)
+tothill_plot = plot_sankey(tothill_network[["links"]], tothill_network[["nodes"]])
+tothill_plot
+
+
+```
+
+```{r plot_yoshihara_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+yoshihara_network = get_sankey_df(sankey_old_df, sankey_new_df, dataset="Yoshihara", k_val=3)
+yoshihara_plot = plot_sankey(yoshihara_network[["links"]], yoshihara_network[["nodes"]])
+yoshihara_plot
+
+
+```
+
+
+```{r plot_aaces_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+aaces_network = get_sankey_df(sankey_old_df, sankey_new_df, dataset="aaces.eset", k_val=3)
+aaces_plot = plot_sankey(aaces_network[["links"]], aaces_network[["nodes"]])
+aaces_plot
+
+print(aaces_network[["links"]])
+```
+```{r plot_aaces_sankey4, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+aaces_network = get_sankey_df(sankey_old_df, sankey_new_df, dataset="aaces.eset", k_val=4)
+aaces_plot = plot_sankey(aaces_network[["links"]], aaces_network[["nodes"]])
+aaces_plot
+
+
+```

@@ -1,0 +1,634 @@
+---
+title: "short_gene_recluster"
+author: "Natalie Davidson"
+date: "9/21/2022"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("VennDiagram")
+require("RColorBrewer")
+require("Rtsne")
+
+library("curatedOvarianData")
+
+theme_set(theme_pubr())
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+
+set.seed(5)
+
+
+```
+
+# INTRO
+
+In this notebook, we want to see if the clusters are driven by a specific confounder.
+The confounders we look at are 1) gene length 2) transcripts in a gene 3) expression of the gene.
+The way we answer this question is to see how much using genes of a specific type drive the clustering.
+A visual description of the approach is shown here:
+
+```{r intro_fig, echo=FALSE, out.width = '100%'}
+knitr::include_graphics(file.path(proj_dir, "/figure_notebooks/qc_microarray_datasets/description_for_subset_gene_recluster.png"), error = FALSE)
+```
+
+# cluster using only the short/long genes and calculate probability of performance
+
+```{r clust_method, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+read_format_expr <- function(in_df, metadata_table){
+    
+     rnaseq_expr_df = in_df
+
+    # format it so we can add metadata
+    gene_ids = row.names(rnaseq_expr_df)
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = sample_ids
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+
+
+get_prob_gene_clust <- function(metadata_table, gene_len_df, mad_df, in_df, percentile_val, short_genes=NA, long_genes=NA){
+    
+ 
+    col_keep = grep("long_madKmeans|short_madKmeans|rand_madKmeans", colnames(metadata_table), value=T, invert=T)
+    metadata_table = metadata_table[,col_keep]
+    
+    genes_len_intersect = intersect(gene_len_df$HGNC.symbol, mad_df$hgnc_symbol)
+    gene_len_df_mad = gene_len_df[gene_len_df$HGNC.symbol %in% genes_len_intersect, ]
+    filt_len = quantile(gene_len_df_mad$Median, c(1-percentile_val, percentile_val))
+    
+    if(is.na(short_genes)){
+        short_genes = gene_len_df_mad$HGNC.symbol[gene_len_df_mad$Median < filt_len[2]]
+    }
+    if(is.na(long_genes)){
+      long_genes = gene_len_df_mad$HGNC.symbol[gene_len_df_mad$Median > filt_len[1]]
+    }
+
+    
+    ###### now use short MAD genes
+    
+    orig_kmeans_res = kmeans(in_df[,short_genes], centers=2, nstart=10)
+    in_df$short_madKmeans_2 = orig_kmeans_res$cluster
+    
+    if(sum(in_df$short_madKmeans_2 != in_df$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+        in_df$short_madKmeans_2 = in_df$short_madKmeans_2-1
+        in_df$short_madKmeans_2[in_df$short_madKmeans_2 == 0] = 2
+    }
+    print(sum(in_df$short_madKmeans_2 == in_df$ClusterK2_kmeans))
+    
+    metadata_table = merge(metadata_table, in_df[,c("ID", "short_madKmeans_2")], by="ID")
+    
+    
+        
+
+    ###### now use long MAD genes
+
+    orig_kmeans_res = kmeans(in_df[,long_genes], centers=2, nstart=10)
+    in_df$long_madKmeans_2 = orig_kmeans_res$cluster
+
+    if(sum(in_df$long_madKmeans_2 != in_df$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+        in_df$long_madKmeans_2 = in_df$long_madKmeans_2-1
+        in_df$long_madKmeans_2[in_df$long_madKmeans_2 == 0] = 2
+    }
+    print(sum(in_df$long_madKmeans_2 == in_df$ClusterK2_kmeans))
+
+    metadata_table = merge(metadata_table, in_df[,c("ID", "long_madKmeans_2")], by="ID")
+
+    print(table(metadata_table$short_madKmeans_2, metadata_table$ClusterK2_kmeans))
+    print(table(metadata_table$long_madKmeans_2, metadata_table$ClusterK2_kmeans))
+    
+    
+    ###### now use random MAD genes
+    dist_of_diff = c()
+    for(idx in 1:100){
+        col_keep = grep("rand_madKmeans", colnames(metadata_table), value=T, invert=T)
+        metadata_table = metadata_table[,col_keep]
+        
+        nonshort_genes = gene_len_df_mad$HGNC.symbol #[gene_len_df_mad$Median > filt_len[2] & gene_len_df_mad$Median < filt_len[1]]
+    
+        rand_genes = sample(nonshort_genes, length(short_genes))
+        orig_kmeans_res = kmeans(in_df[,rand_genes], centers=2, nstart=10)
+        in_df$rand_madKmeans_2 = orig_kmeans_res$cluster
+        
+        if(sum(in_df$rand_madKmeans_2 != in_df$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+            in_df$rand_madKmeans_2 = in_df$rand_madKmeans_2-1
+            in_df$rand_madKmeans_2[in_df$rand_madKmeans_2 == 0] = 2
+        }
+        metadata_table = merge(metadata_table, in_df[,c("ID", "rand_madKmeans_2")], by="ID")
+        dist_of_diff = c(dist_of_diff, 
+                         sum(metadata_table$rand_madKmeans_2 != metadata_table$ClusterK2_kmeans))
+    }
+    d_fun <- ecdf(dist_of_diff)
+
+    sum_short = sum(metadata_table$short_madKmeans_2 != metadata_table$ClusterK2_kmeans)
+    sum_long = sum(metadata_table$long_madKmeans_2 != metadata_table$ClusterK2_kmeans)
+    
+    
+    return(list(d_fun, sum_short, sum_long, short_genes, long_genes))
+}
+
+get_len_expr <- function(in_df, in_genes){
+    
+    gene_expr_med = in_df[,in_genes]
+    gene_expr_med = apply(gene_expr_med, 2, median)
+    gene_expr_med = data.frame(HGNC.symbol = names(gene_expr_med),
+                               median_expr = gene_expr_med)
+    gene_expr_med = merge(gene_expr_med, gene_len_df, by="HGNC.symbol")
+    colnames(gene_expr_med)[4] = "median_len"
+
+    return(gene_expr_med)
+}
+
+
+```
+
+
+## Get metadata
+
+```{r get_cluster_ids, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+clust_id_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+clust_df = data.frame(fread(clust_id_file))
+colnames(clust_df)[1] = "ID"
+
+
+# gene length info
+gene_meta_file = file.path(proj_dir, 
+                    "/reference_data/temp_gene_lengths.tsv")
+gene_len_df = data.frame(fread(gene_meta_file))
+gene_len_df = gene_len_df[order(gene_len_df$Median, decreasing = T),]
+gene_len_df = gene_len_df[!duplicated(gene_len_df$HGNC.symbol),]
+
+# get the number of transcripts
+ens_trans_file = file.path(proj_dir, 
+                    "/reference_data/ensembl_transcript_len.tsv")
+ens_trans_df = data.frame(fread(ens_trans_file))
+ens_trans_freq = table(ens_trans_df$Gene.stable.ID)
+ens_trans_df = data.frame(ens_trans_freq)
+colnames(ens_trans_df) = c("Gene.stable.ID", "num_trans")
+
+# translate the transcript freq table
+ens_hgnc_file = file.path(proj_dir, 
+                    "/reference_data/ensembl_to_hgnc.tsv")
+ens_hgnc_df = data.frame(fread(ens_hgnc_file))
+ens_trans_df = merge(ens_trans_df, ens_hgnc_df)
+ens_trans_df = ens_trans_df[order(ens_trans_df$num_trans, decreasing = T),]
+ens_trans_df = ens_trans_df[!duplicated(ens_trans_df$HGNC.symbol),]
+ens_trans_df = ens_trans_df[,c("Gene.stable.ID", "HGNC.symbol", "num_trans")]
+
+# rename it to median so that we can use the methods for gene length analysis
+colnames(ens_trans_df)[3] = c("Median")
+
+
+
+# filter for genes used in the analysis
+# MAD genes
+gene_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+mad_df <- data.frame(fread(gene_file))
+colnames(mad_df)[1] = "hgnc_symbol"
+
+# parameters for clustering
+percentile_val = 0.1
+
+```
+
+
+## Analyze in tothill
+
+### length of transcripts
+
+```{r tothill_len_trans, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+tothill_data = data(GSE9891_eset)
+ExpressionData <- get(tothill_data)
+dta <- exprs(ExpressionData)
+
+metadata_table = subset(clust_df, Dataset == "Tothill")
+
+
+# format the expr table
+res = read_format_expr(dta, metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_len_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+# calculate the relationship between gene length and expression
+gene_expr_med = get_len_expr(in_df, in_genes)
+print(cor.test(gene_expr_med$median_expr, gene_expr_med$median_len))
+colnames(gene_expr_med)[2] = "Median"
+
+```
+
+
+### Number of transcripts
+
+```{r tothill_num_trans, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, ens_trans_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+### Expression of genes
+
+```{r tothill_expr, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_expr_med, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+
+
+
+## Analyze in Yoshihara
+
+```{r read_yosh, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+yoshihara_data = data(GSE32062.GPL6480_eset)
+ExpressionData <- get(yoshihara_data)
+dta <- exprs(ExpressionData)
+
+metadata_table = subset(clust_df, Dataset == "Yoshihara")
+
+
+# format the expr table
+res = read_format_expr(dta, metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_len_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_yosh = clust_res[[4]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+# calculate the relationship between gene length and expression
+gene_expr_med = get_len_expr(in_df, in_genes)
+print(cor.test(gene_expr_med$median_expr, gene_expr_med$median_len))
+colnames(gene_expr_med)[2] = "Median"
+
+```
+
+
+### Number of transcripts
+
+```{r yoshihara_num_trans, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, ens_trans_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+
+### Expression of genes
+
+```{r yoshihara_expr, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_expr_med, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+## Analyze in TCGA
+
+```{r read_tcga, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+tcga_data = data(TCGA_eset)
+ExpressionData <- get(tcga_data)
+dta <- exprs(ExpressionData)
+
+
+metadata_table = subset(clust_df, Dataset == "TCGA")
+
+
+# format the expr table
+res = read_format_expr(dta, metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_len_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tcga = clust_res[[4]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+# calculate the relationship between gene length and expression
+gene_expr_med = get_len_expr(in_df, in_genes)
+print(cor.test(gene_expr_med$median_expr, gene_expr_med$median_len))
+colnames(gene_expr_med)[2] = "Median"
+
+
+```
+
+
+### Number of transcripts
+
+```{r tcga_num_trans, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, ens_trans_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+
+### Expression of genes
+
+```{r tcga_expr, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_expr_med, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+## Analyze in Mayo
+
+```{r read_mayo, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+mayo_data = load(file=file.path(proj_dir, 
+                                "/data/mayo/MayoEset.Rda"))
+
+ExpressionData <- get(mayo_data)
+dta <- exprs(ExpressionData)
+
+
+metadata_table = subset(clust_df, Dataset == "mayo.eset")
+
+
+# format the expr table
+res = read_format_expr(dta, metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_len_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_mayo = clust_res[[4]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+# calculate the relationship between gene length and expression
+gene_expr_med = get_len_expr(in_df, in_genes)
+print(cor.test(gene_expr_med$median_expr, gene_expr_med$median_len))
+colnames(gene_expr_med)[2] = "Median"
+
+```
+
+### Number of transcripts
+
+```{r mayo_num_trans, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, ens_trans_df, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+
+### Expression of genes
+
+```{r mayo_expr, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+clust_res = get_prob_gene_clust(metadata_table, gene_expr_med, mad_df, in_df, percentile_val)
+dist_au = clust_res[[1]]
+sum_short = clust_res[[2]]
+sum_long = clust_res[[3]]
+short_genes_tot = clust_res[[4]]
+long_genes_tot = clust_res[[5]]
+print(dist_au(sum_short))
+print(dist_au(sum_long))
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_short, col="blue")
+abline(v=sum_long, col="red")
+
+
+```
+
+
+### Quick test of Nanostring geneset for Mayo
+
+```{r mayo_nanostring, fig.align='center', fig.width=5, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+match_clusters_k4 <- function(in_df, col_interest){
+    
+    col_idx = which(colnames(in_df) == col_interest)
+    colnames(in_df)[col_idx] = "temp_in"
+    
+    a = table(in_df$temp_in, in_df$ClusterK4_kmeans)
+    a = data.frame(a)
+    a = a[order(a$Freq, a$Var1, decreasing=T),]
+    a = a[!duplicated(a$Var1),]
+    
+    in_df$temp_out = in_df$temp_in
+    in_df$temp_out[in_df$temp_in == 1] = a$Var2[a$Var1==1]
+    in_df$temp_out[in_df$temp_in == 2] = a$Var2[a$Var1==2]
+    in_df$temp_out[in_df$temp_in == 3] = a$Var2[a$Var1==3]
+    in_df$temp_out[in_df$temp_in == 4] = a$Var2[a$Var1==4]
+    
+    col_idx = which(colnames(in_df) == "temp_out")
+    colnames(in_df)[col_idx] = col_interest
+    
+    col_keep = grep("temp", colnames(in_df), value=T, invert=T)
+    in_df = in_df[,col_keep]
+    
+    return(in_df)
+
+}
+
+# get the nanostring file
+nano_file = file.path(proj_dir, "/data/nanostring/NCONanostingClassifierData_forAriel.csv")
+nano_df <- data.frame(fread(nano_file))
+nano_genes = colnames(nano_df)[-1]
+
+col_keep = grep("rand_madKmeans|nano_Kmeans|matched_Kmeans", colnames(metadata_table), value=T, invert=T)
+metadata_table = metadata_table[,col_keep]
+
+nano_intersect = intersect(nano_genes, in_genes)
+
+
+###### now use nano genes
+
+orig_kmeans_res = kmeans(in_df[,nano_intersect], centers=4, nstart=10)
+in_df$nano_Kmeans_4 = orig_kmeans_res$cluster
+in_df = match_clusters_k4(in_df, col_interest="nano_Kmeans_4")
+
+
+metadata_table = merge(metadata_table, in_df[,c("ID", "nano_Kmeans_4")], by="ID")
+
+
+###### now use random MAD genes
+dist_of_diff = c()
+for(idx in 1:1000){
+    col_keep = grep("rand_madKmeans", colnames(metadata_table), value=T, invert=T)
+    metadata_table = metadata_table[,col_keep]
+    
+    rand_genes = sample(mad_df$hgnc_symbol, length(nano_intersect))
+    orig_kmeans_res = kmeans(in_df[,rand_genes], centers=4, nstart=10)
+    in_df$rand_madKmeans_4 = orig_kmeans_res$cluster
+    
+    in_df = match_clusters_k4(in_df, col_interest="rand_madKmeans_4")
+
+    metadata_table = merge(metadata_table, in_df[,c("ID", "rand_madKmeans_4")], by="ID")
+    dist_of_diff = c(dist_of_diff, 
+                     sum(metadata_table$rand_madKmeans_4 != metadata_table$ClusterK4_kmeans))
+}
+d_fun <- ecdf(dist_of_diff)
+
+sum_nano = sum(metadata_table$nano_Kmeans_4 != metadata_table$ClusterK4_kmeans)
+table(metadata_table$nano_Kmeans_4, metadata_table$ClusterK4_kmeans)
+table(metadata_table$rand_madKmeans_4, metadata_table$ClusterK4_kmeans)
+
+# plot the ECDF
+plot(dist_au)
+abline(v=sum_nano, col="blue")
+
+```

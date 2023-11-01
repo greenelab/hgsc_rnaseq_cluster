@@ -1,0 +1,528 @@
+---
+title: "check_affy_degradation"
+author: "Natalie Davidson"
+date: "9/21/2022"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("VennDiagram")
+require("RColorBrewer")
+require("Rtsne")
+require("viridis")
+
+library("curatedOvarianData")
+
+theme_set(theme_pubr())
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+
+set.seed(5)
+
+
+```
+
+In this notebook, we will show how the Tothill and TCGA datasets have clusters that are correlated with library size, but not fully explained by degradation.
+Since these are the only 2 Affy datasets in our analysis, we are only able to calculate a degradtaion score for these datasets.
+This is because Affy MAs (microarrays) use multiple probes per gene, where we can estimate 5'/3' bias.
+The other datasets are done on agilent -- we can not calculate probe bias on those MA's, so we instead look at biases of gene length.
+
+
+## read in metadata
+
+```{r read_meta, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+# current cluster labels
+clust_id_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_all/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+clust_df = data.frame(fread(clust_id_file))
+colnames(clust_df)[1] = "ID"
+
+# original cluster labels
+old_file = file.path(proj_dir, 
+                    "/data/way_publication_results/033514_tables3.csv")
+
+old_df = data.frame(fread(old_file))
+
+# gene length
+gene_meta_file = file.path(proj_dir, 
+                    "/reference_data/temp_gene_lengths.tsv")
+gene_len_df = data.frame(fread(gene_meta_file))
+gene_len_df = gene_len_df[order(gene_len_df$Median, decreasing = T),]
+gene_len_df = gene_len_df[!duplicated(gene_len_df$HGNC.symbol),]
+
+# MAD genes used in clustering
+gene_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+gene_df <- data.frame(fread(gene_file))
+colnames(gene_df)[1] = "hgnc_symbol"
+
+
+```
+
+
+
+
+## Make boxplots methods
+
+```{r boxplots_method, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+
+read_format_expr <- function(in_df, metadata_table){
+    
+     rnaseq_expr_df = in_df
+
+    # format it so we can add metadata
+    gene_ids = row.names(rnaseq_expr_df)
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = sample_ids
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+plot_boxplot_expr <- function(in_df, in_genes, metadata_table, gene_len_df, col_name_interest, 
+                              col_plot_name, title_txt, xlab_txt, ylab_txt){
+        
+    # now plot the stats
+    gene_count_df = in_df[,in_genes]
+    gene_count_df$sample_id = in_df$ID
+    gene_count_melt <- melt(gene_count_df, id.vars="sample_id")
+    colnames(gene_count_melt) = c("ID", "gene_id", "count")
+    
+    # add version tag
+    gene_count_melt = merge(gene_count_melt, metadata_table, by="ID")
+    
+    # order samples by median expression
+    sample_order_df = data.frame(median_count = apply(in_df[,in_genes], 1, median),
+                                 ID = in_df$ID)
+    sample_order_df = sample_order_df[order(sample_order_df$median_count),]
+    gene_count_melt = merge(gene_count_melt, sample_order_df)
+    gene_count_melt$ID = factor(gene_count_melt$ID, 
+                                        levels = sample_order_df$ID)
+
+    col_idx = which(colnames(gene_count_melt) == col_name_interest)
+    colnames(gene_count_melt)[col_idx] = "fill_col"
+    gg = ggplot(gene_count_melt, aes(x=as.factor(ID), y=count, fill=as.factor(fill_col))) +
+        geom_boxplot() + theme_bw() +
+        theme(axis.text.x = element_blank()) +
+        xlab(xlab_txt) + ylab(ylab_txt) +
+            ggtitle(title_txt) +
+        labs(fill = col_plot_name)
+    ggS = ggplot(gene_count_melt, aes(x=as.factor(ID), y=count, fill=round(slope, 1))) +
+        geom_boxplot() + theme_bw() +
+        theme(axis.text.x = element_blank()) +
+        xlab(xlab_txt) + ylab(ylab_txt) +
+        ggtitle(title_txt) + scale_fill_viridis() +
+        labs(fill = "RNADeg (lower\n= degraded)")   
+    
+    med_df = unique(gene_count_melt[,c("ID", "fill_col", "median_count", "slope")])
+    gg1 = ggplot(med_df, aes(x=fill_col, y=median_count, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(col_plot_name) + ylab("median") +
+            labs(fill = col_plot_name) + theme(legend.position = "none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+    # subset for the short genes only
+    gene_len_df_inter = intersect(gene_count_melt$gene_id, gene_len_df$HGNC.symbol)
+    gene_len_df_inter = subset(gene_len_df, HGNC.symbol %in% gene_len_df_inter)
+    cutoff = quantile(gene_len_df_inter$Median, 0.10)
+    gene_len_df_short = subset(gene_len_df_inter, Median < cutoff)
+    cutoff = quantile(gene_len_df_inter$Median, 0.90)
+    gene_len_df_long = subset(gene_len_df, Median > cutoff)
+
+    gene_count_melt_short = subset(gene_count_melt, gene_id %in% gene_len_df_short$HGNC.symbol)
+    gene_count_melt_short_med = gene_count_melt_short %>%
+                                    group_by(ID)%>% 
+                                    summarise(Median_short=median(count))
+    gene_count_melt_short = merge(gene_count_melt_short, gene_count_melt_short_med)
+    x_lab_gene = paste(col_plot_name, "Ngenes=", length(unique(gene_count_melt_short$gene_id)))
+    gg2 = ggplot(gene_count_melt_short, aes(x=fill_col, y=Median_short, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(x_lab_gene) + ylab("short genes median ") +
+            labs(fill = col_plot_name) + theme(legend.position = "none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+    
+    
+    gene_count_melt_long = subset(gene_count_melt, gene_id %in% gene_len_df_long$HGNC.symbol)
+    gene_count_melt_long_med = gene_count_melt_long %>%
+                                    group_by(ID)%>% 
+                                    summarise(Median_long=median(count))
+    gene_count_melt_long = merge(gene_count_melt_long, gene_count_melt_long_med)
+    x_lab_gene = paste(col_plot_name, "Ngenes=", length(unique(gene_count_melt_long$gene_id)))
+    gg3 = ggplot(gene_count_melt_long, aes(x=fill_col, y=Median_long, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(x_lab_gene) + ylab("long genes median ") +
+            labs(fill = col_plot_name) + theme(legend.position = "none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+    gg4 = ggplot(med_df, aes(slope, fill=as.factor(fill_col))) +
+            geom_density(alpha=0.5) + theme_bw() +
+            xlab(col_plot_name) + ylab("RNADeg (lower\n= degraded)") +
+            labs(fill = col_plot_name) + theme(legend.position = "none")
+    gg5 = ggplot(med_df, aes(x=fill_col, y=slope, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(col_plot_name) + ylab("RNADeg (lower\n= degraded)") +
+            labs(fill = col_plot_name) + theme(legend.position = "none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+    flat_plot = ggarrange(gg, ggS, 
+                          ggarrange(gg1, gg2, gg3, gg4, gg5, ncol=5),
+                          nrow=3)
+    return(flat_plot)
+}
+
+
+```
+
+# Tothill
+
+
+## read in tothill
+
+```{r read_tothill, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+tothill_data = data(GSE9891_eset)
+ExpressionData <- get(tothill_data)
+tothill_dta <- exprs(ExpressionData)
+
+tothill_metadata_table = subset(clust_df, Dataset == "Tothill")
+
+
+tothill_old_df = subset(old_df, Dataset == "Tothill")
+tothill_old_df = tothill_old_df[,-2]
+colnames(tothill_old_df)[2:ncol(tothill_old_df)] = paste0("ORIG_", colnames(tothill_old_df)[2:ncol(tothill_old_df)])
+tothill_metadata_table = merge(tothill_metadata_table, tothill_old_df, by="ID")
+
+# read in the degradation scores
+slope_file = file.path(proj_dir, 
+                    "/reference_data/tothill_rnadeg.tsv")
+slope_df = data.frame(fread(slope_file))
+colnames(slope_df) = c("ID", "rna_deg")
+slope_df$ID = gsub(".CEL.gz", "", slope_df$ID)
+tothill_metadata_table = merge(tothill_metadata_table, slope_df)
+
+# read in the other method for calculating degradation scores
+slope_file = file.path(proj_dir, 
+                    "/reference_data/tothill_slope.tsv")
+slope_df = data.frame(fread(slope_file))
+colnames(slope_df) = c("ID", "slope", "threeP", "fiveP")
+tothill_metadata_table = merge(tothill_metadata_table, slope_df)
+
+
+
+```
+
+
+
+## Make boxplots 
+
+```{r boxplots, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+# format the expr table
+res = read_format_expr(tothill_dta, tothill_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+subset_cols = c(colnames(tothill_metadata_table), gene_df$hgnc_symbol)
+
+
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, tothill_metadata_table, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "tothill Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_tothill_degradation.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+### K=2
+
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, tothill_metadata_table, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "tothill Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_tothill_degradation.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+
+####### calculate test
+
+sample_order_df = data.frame(med = apply(in_df[,in_genes], 1, median),
+                             ID = in_df$ID)
+
+wilcox_df = merge(sample_order_df, tothill_metadata_table, by="ID")
+wilcox_df = wilcox_df[order(wilcox_df$slope),]
+
+num_g1 = sum(wilcox_df$ClusterK2_kmeans == 1)
+
+print(wilcox.test(wilcox_df$ClusterK2_kmeans[1:num_g1],
+                  wilcox_df$ClusterK2_kmeans[(num_g1+1):nrow(wilcox_df)]))
+print(wilcox.test(wilcox_df$ClusterK2_NMF[1:num_g1], 
+                  wilcox_df$ClusterK2_NMF[(num_g1+1):nrow(wilcox_df)]))
+
+    
+    
+```
+
+
+# TCGA
+
+
+## read in TCGA
+
+```{r read_tcga, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+tcga_data = data(TCGA_eset)
+ExpressionData <- get(tcga_data)
+tcga_dta <- exprs(ExpressionData)
+
+tcga_metadata_table = subset(clust_df, Dataset == "TCGA")
+
+
+tcga_old_df = subset(old_df, Dataset == "TCGA")
+tcga_old_df = tcga_old_df[,-2]
+colnames(tcga_old_df)[2:ncol(tcga_old_df)] = paste0("ORIG_", colnames(tcga_old_df)[2:ncol(tcga_old_df)])
+tcga_metadata_table = merge(tcga_metadata_table, tcga_old_df, by="ID")
+
+
+# get TCGA publication IDs
+tcgaPub_file = file.path(proj_dir, 
+                    "/reference_data/Verhaak2013_Supplemental.csv")
+
+tcgaPub_df = data.frame(fread(tcgaPub_file))
+tcgaPub_df = tcgaPub_df[-1,]
+colnames(tcgaPub_df) = tcgaPub_df[1,]
+tcgaPub_df = tcgaPub_df[-1,]
+tcgaPub_df = subset(tcgaPub_df, DATASET %in% c("TCGA-discovery", "TCGA-validation"))
+tcgaPub_df$Dataset = "TCGA"
+tcgaPub_df = tcgaPub_df[,c("ID", "SUBTYPE")]
+tcgaPub_df$ID = gsub("-", ".", tcgaPub_df$ID)
+
+tcga_metadata_table = merge(tcga_metadata_table, tcgaPub_df, by="ID")
+
+# get the slope of 3'/5'
+slope_file = file.path(proj_dir, 
+                    "/reference_data/tcga_slope.tsv")
+slope_df = data.frame(fread(slope_file))
+slope_df_dup = which(duplicated(slope_df$ID))
+slope_df_dup = slope_df$ID[slope_df_dup]
+slope_df = subset(slope_df, ! ID %in% slope_df_dup )
+colnames(slope_df)[2] = c("slope")
+tcga_metadata_table = merge(tcga_metadata_table, slope_df, by="ID")
+
+# get the rnadeg
+slope_file = file.path(proj_dir, 
+                    "/reference_data/tcga_rnadeg.tsv")
+slope_df = data.frame(fread(slope_file))
+
+#format rna_deg
+colnames(slope_df) = c("cel_ID", "rna_deg")
+slope_df$cel_ID = gsub(".CEL", "", slope_df$cel_ID)
+
+# reformat the IDs in the degradation file
+tcga_samp_file = file.path(proj_dir, 
+                    "/reference_data/broad.mit.edu_OV.HT_HG-U133A.sdrf.txt")
+tcga_samp_df = data.frame(fread(tcga_samp_file))
+tcga_samp_df = unique(tcga_samp_df[,c("Comment..TCGA.Barcode.", "Hybridization.Name")])
+colnames(tcga_samp_df) = c("ID", "cel_ID")
+tcga_samp_df$ID = substr(tcga_samp_df$ID, 1, 12)
+tcga_samp_df$ID = gsub("-", ".", tcga_samp_df$ID)
+slope_df = merge(slope_df, tcga_samp_df, by="cel_ID")
+slope_df = slope_df[,c("rna_deg", "ID")]
+
+# remove duplicated aliquots -- this is too restrictive
+# but this is just for sanity checks 
+# if we want to publish this analysis we will have to do a better job matching
+# sample IDs to aliquots
+slope_df_dup = which(duplicated(slope_df$ID))
+slope_df_dup = slope_df$ID[slope_df_dup]
+slope_df = subset(slope_df, ! ID %in% slope_df_dup )
+tcga_metadata_table = merge(tcga_metadata_table, slope_df, by="ID")
+
+
+
+```
+
+
+
+## Make boxplots 
+
+```{r boxplots_tcga, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+# format the expr table
+res = read_format_expr(tcga_dta, tcga_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+subset_cols = c(colnames(tcga_metadata_table), gene_df$hgnc_symbol)
+
+
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, tcga_metadata_table, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "tcga Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_tcga_degradation.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+### K=2
+
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, tcga_metadata_table, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "tcga Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_tcga_degradation.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+# plot the original TCGA paper clusters
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, tcga_metadata_table, gene_len_df,
+                  col_name_interest = "SUBTYPE", 
+                  col_plot_name = "SUBTYPE",
+                  title = "TCGA Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/TCGAPUB_TCGA.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+
+####### calculate test
+
+sample_order_df = data.frame(med = apply(in_df[,in_genes], 1, median),
+                             ID = in_df$ID)
+
+wilcox_df = merge(sample_order_df, tcga_metadata_table, by="ID")
+wilcox_df = wilcox_df[order(wilcox_df$slope),]
+
+num_g1 = sum(wilcox_df$ClusterK2_kmeans == 1)
+
+print(wilcox.test(wilcox_df$ClusterK2_kmeans[1:num_g1],
+                  wilcox_df$ClusterK2_kmeans[(num_g1+1):nrow(wilcox_df)]))
+print(wilcox.test(wilcox_df$ClusterK2_NMF[1:num_g1], 
+                  wilcox_df$ClusterK2_NMF[(num_g1+1):nrow(wilcox_df)]))
+
+    
+    
+```
+
+
+# Bonome
+
+
+## read in Bonome
+
+```{r read_bonome, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+bonome_data = data(GSE26712_eset)
+ExpressionData <- get(bonome_data)
+bonome_dta <- exprs(ExpressionData)
+
+bonome_metadata_table = subset(old_df, Dataset == "Bonome")
+
+# read in the other method for calculating degradation scores
+slope_file = file.path(proj_dir, 
+                    "/reference_data/bonome_slope.tsv")
+slope_df = data.frame(fread(slope_file))
+colnames(slope_df) = c("ID", "slope", "threeP", "fiveP")
+bonome_metadata_table = merge(bonome_metadata_table, slope_df)
+
+
+
+```
+
+
+## Make boxplots 
+
+```{r boxplots_bonome, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+# format the expr table
+res = read_format_expr(bonome_dta, bonome_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+subset_cols = c(colnames(bonome_metadata_table), gene_df$hgnc_symbol)
+
+
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, bonome_metadata_table, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "Bonome Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_bonome_degradation.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+### K=2
+
+raw_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, bonome_metadata_table, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "bonome Intensity distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "Intensity")
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_bonome_degradation.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+raw_gg
+
+
+####### calculate test
+
+sample_order_df = data.frame(med = apply(in_df[,in_genes], 1, median),
+                             ID = in_df$ID)
+
+wilcox_df = merge(sample_order_df, bonome_metadata_table, by="ID")
+wilcox_df = wilcox_df[order(wilcox_df$slope),]
+
+num_g1 = sum(wilcox_df$ClusterK2_kmeans == 1)
+
+print(wilcox.test(wilcox_df$ClusterK2_kmeans[1:num_g1],
+                  wilcox_df$ClusterK2_kmeans[(num_g1+1):nrow(wilcox_df)]))
+print(wilcox.test(wilcox_df$ClusterK2_NMF[1:num_g1], 
+                  wilcox_df$ClusterK2_NMF[(num_g1+1):nrow(wilcox_df)]))
+
+    
+    
+```

@@ -1,0 +1,574 @@
+---
+title: "analyze_rnaseq_white_patients"
+author: "Natalie Davidson"
+date: "3/11/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("readr")
+require("SummarizedExperiment")
+require("ggrepel")
+require("ggcorrplot")
+require("biomaRt")
+require("VennDiagram")
+require("pheatmap")
+require("RColorBrewer")
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+set.seed(5)
+
+```
+## RNASeq after Salmon Quant QC
+
+This document is for QC checking for any anomalies in the RNA-Seq counts from the white samples:
+
+Subtypes described in here are from the file: `/reference_data/RNAseq_sample_selection_subtable_removed.tsv`
+This file contains the NanoString predicted subtypes.
+This file was received in the email from Mollie Barnard "RNAseq pilot sample summary"
+The original file is called "RNAseq sample selection.csv" and has the additional
+slideshow "NCOCS RNAseq pilot sample summary".
+
+
+### read in the RDS file containing gene counts
+
+
+```{r qc_matrs, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+#306 samples in the full study were sent for sequencing.
+
+#The following samples failed: 
+
+samps_failed = c("Sample_20160X13")
+failed_df = data.frame(metric=rep("failed", length(samps_failed)),
+                       samp_ids = samps_failed)
+
+
+#The following samples were re-sequenced to get higher yeild:
+samps_reseq = c("Sample_20160X104", "Sample_20160X106", "Sample_20160X110", "Sample_20160X112", 
+                 "Sample_20160X252", "Sample_20160X253", "Sample_20160X255", "Sample_20160X259")
+re_seq_df = data.frame(metric=rep("re_seq", length(samps_reseq)),
+                       samp_ids = samps_reseq)
+
+samps_reseq_obs = c("Sample_20160X252", "Sample_20160X253", "Sample_20160X255", "Sample_20160X259")
+
+
+# the following had low starting material
+samps_low_quality = c("Sample_20160X107", "Sample_20160X169", "Sample_20160X171", 
+                    "Sample_20160X178", "Sample_20160X185", "Sample_20160X216", 
+                    "Sample_20160X217", "Sample_20160X234", "Sample_20160X254", 
+                    "Sample_20160X256", "Sample_20160X260", "Sample_20160X262")
+low_qual_df = data.frame(metric=rep("low_qual", length(samps_low_quality)),
+                       samp_ids = samps_low_quality)
+
+
+qc_degradation = do.call(rbind, list(failed_df, re_seq_df, low_qual_df))
+
+# add visualization
+display_venn(
+  list(samps_failed, samps_reseq, samps_low_quality),
+  category.names = c("Failed" , "Re-Sequenced", "low quality"),
+  fill = brewer.pal(n = 3, name = "Set3")
+  )
+
+
+```
+
+
+
+### read in the RDS file containing gene counts
+
+
+```{r read_in, fig.align='center', echo=FALSE, warning=FALSE, message=F}
+
+get_count <- function(infile, get_dates=T){
+
+    gene_summarized = readr::read_rds(infile)
+    count_matr = assay(gene_summarized, "counts")
+    
+    df_dates=NA
+    if(get_dates){
+        df_dates = gene_summarized$date
+    }
+    return(list(count_matr, df_dates))
+}
+
+
+# get the project directory, everything is set relative to this
+proj_dir = here()
+
+# read in original RNASeq files
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq/salmon_quant_processed/salmon_gene_quant.RDS")
+
+gene_count_orig = get_count(gene_expr_file)[[1]]
+
+# read in whites-new RNASeq file
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_gene_quant_whites.RDS")
+
+gene_count_new = get_count(gene_expr_file)[[1]]
+date_new = get_count(gene_expr_file)[[2]]
+
+assertthat::are_equal(297, ncol(gene_count_new))
+
+
+colnames(gene_count_new) = substr(colnames(gene_count_new), 1, nchar(colnames(gene_count_new)) - 5)
+
+```
+
+# now we need to process the samples that were resequenced
+
+To disambiguate them we select on the most recently sequenced sample
+
+
+```{r remove_reseq, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+dim(gene_count_new)
+
+idx_remove = c()
+for(curr_samp_id in samps_reseq_obs){
+    
+    # get the duplicate columns
+    dup_idx = grep(curr_samp_id, colnames(gene_count_new))
+
+    # chose the one sequenced later
+    # assumes only 2 runs
+    idx_min = which.min(as.numeric(date_new[dup_idx]))
+    
+    idx_remove = c(idx_remove, dup_idx[idx_min])
+}
+
+# now remove them
+gene_count_new = gene_count_new[,-idx_remove]
+dim(gene_count_new)
+
+assertthat::are_equal(293, ncol(gene_count_new))
+
+# remove the lane info
+#colnames(gene_count_new) = substr(colnames(gene_count_new), 1, nchar(colnames(gene_count_new)) - 5)
+
+# write out the file
+gene_count_se = SummarizedExperiment(assays=list(counts=gene_count_new),
+                                        rowData=data.frame(gene_id=row.names(gene_count_new)), 
+                                        colData=data.frame(gnomex_id = colnames(gene_count_new)))
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_gene_quant_whites_filtered.RDS")
+saveRDS(gene_count_se, file = gene_expr_file)
+
+```
+
+
+Merge together the new and old data sources
+
+```{r combine_new_old, fig.align='center', echo=FALSE, warning=FALSE, message=F}
+
+# now join them together
+# make sure rownames are the same
+stopifnot(all(row.names(gene_count_new) == row.names(gene_count_orig)))
+gene_count = cbind(gene_count_orig, gene_count_new)
+
+
+# read in the samples that should be excluded
+# we will remove all samples that are from white women
+samp_exclusion_file = file.path(proj_dir, 
+                    "/reference_data/way_exclusions.csv")
+samp_exclusion_df = data.frame(fread(samp_exclusion_file))
+samp_exclusion_df = subset(samp_exclusion_df, exclude_white==TRUE)
+
+# KEEP the samples that are from white women
+sample_ids_keep = paste0("Sample_", samp_exclusion_df$ID)
+sample_ids_keep = intersect(colnames(gene_count_orig), sample_ids_keep)
+sample_ids_keep = c(sample_ids_keep, colnames(gene_count_new))
+stopifnot(length(sample_ids_keep) == 316)
+gene_count = gene_count[,sample_ids_keep]
+
+
+# add in a tag for which experiment the sample is from
+expr_version = c(rep("orig", length(intersect(colnames(gene_count_orig), colnames(gene_count)))),
+                 rep("new", length(intersect(colnames(gene_count_new), colnames(gene_count)))))
+expr_version_df = data.frame(version=expr_version, sample_id=colnames(gene_count))
+
+# add in other metadata
+expr_version_df$re_seq = FALSE
+expr_version_df$re_seq[expr_version_df$sample_id %in% samps_reseq] = TRUE
+
+expr_version_df$low_qual = FALSE
+expr_version_df$low_qual[expr_version_df$sample_id %in% samps_low_quality] = TRUE
+
+
+gene_count[1:5,1:5]
+
+```
+
+### plot general stats about the samples
+
+Here we want to see if there are any sample outliers in expression that may be due to technical artifacts.
+So lets look at the raw count values and see if any samples have much higher expression than others.
+```{r raw_count_comparison, fig.align='center', fig.width=15, fig.height=7, echo=FALSE, warning=FALSE, message=F}
+
+# now plot the stats
+gene_count_df = data.frame(gene_count)
+gene_count_df$gene_id = row.names(gene_count_df)
+gene_count_melt <- melt(gene_count_df, id.vars="gene_id")
+colnames(gene_count_melt) = c("gene_id", "sample_id", "count")
+
+# add version tag
+gene_count_melt = merge(gene_count_melt, expr_version_df)
+
+# order samples by median expression
+sample_order_df = data.frame(median_count = apply(gene_count, 2, median),
+                             sample_id = colnames(gene_count))
+sample_order_df = sample_order_df[order(sample_order_df$median_count),]
+gene_count_melt$sample_id = factor(gene_count_melt$sample_id, 
+                                    levels = sample_order_df$sample_id)
+ggplot(gene_count_melt, aes(x=as.factor(sample_id), y=count, fill=version)) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_blank()) +
+    xlab("Sample IDs") + ylab("count") +
+        ggtitle("count distribution over gene for each sample")
+
+ggplot(gene_count_melt, aes(x=as.factor(sample_id), y=log10(count+1), fill=version)) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_blank()) +
+    xlab("Sample IDs") + ylab("log10(count+1)") +
+        ggtitle("count distribution over gene for each sample")
+
+
+```
+
+It's a bit difficult to see, to lets filter out genes that have too low expression.
+To determine this, lets look at the number of genes remaining at different median cutoffs
+
+```{r gene_filtering_by_expr, fig.align='center', width=15, height=7, echo=FALSE, warning=FALSE, message=F}
+
+# now plot the stats
+cutoff_df = NA
+for(med_cutoff in 0:10){
+    
+    filtered_genes = length(which(apply(gene_count, 1, median)<=med_cutoff))
+    cutoff_res = c(filtered_genes/nrow(gene_count), 
+                   1-filtered_genes/nrow(gene_count),
+                   med_cutoff)
+    cutoff_df = rbind(cutoff_df, cutoff_res)
+
+}
+cutoff_df = data.frame(cutoff_df[-1,])
+colnames(cutoff_df) = c("genes_removed", "genes_kept", "cutoff")
+cutoff_df$cutoff = factor(cutoff_df$cutoff)
+cutoff_df = melt(cutoff_df, id.vars=c("cutoff"))
+
+ggplot(cutoff_df, aes(x=cutoff, y=value, fill=variable)) +
+   geom_bar(stat="identity", position="stack") + theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    ylab("% Genes") + xlab("cutoff") +
+        ggtitle("% of genes remaining at different cutoffs")
+
+```
+
+A cutoff of greater than zero seems to maintain a more than 50% of genes, so lets now replot with this filtering.
+Additionally, using this level of filtering lets normalize by 85th quantile.
+We see that samples 107, 234, 144, 226 have the lowest expression overall.
+We also see that the samples with low starting material are also in the bottom,
+so we filter out the bottom 10 samples.
+
+```{r filt_normalized_count_comparison, fig.align='center', fig.width=15, fig.height=7, echo=FALSE, warning=FALSE, message=F}
+
+# now plot the filtered version
+filtered_genes = rownames(gene_count)[which(apply(gene_count, 1, median)==0)]
+gene_count_df_filt = subset(gene_count_melt, ! gene_id %in% filtered_genes)
+
+ggplot(gene_count_df_filt, aes(x=as.factor(sample_id), y=log10(count+1), fill=version)) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    xlab("Sample IDs") + ylab("log10(count+1)") +
+        ggtitle("filtered count distribution over gene for each sample")
+
+# now plot the normalized version
+gene_count_filt = subset(gene_count, 
+                         ! rownames(gene_count) %in% filtered_genes)
+samp_85th = apply(gene_count_filt, 2, quantile, 0.85)
+samp_85th = samp_85th/max(samp_85th)
+gene_count_filt_norm = sweep(gene_count_filt, 2, samp_85th, FUN = '/')
+
+gene_count_filt_norm_melt = data.frame(gene_count_filt_norm)
+gene_count_filt_norm_melt$gene_id = row.names(gene_count_filt_norm_melt)
+gene_count_filt_norm_melt <- melt(gene_count_filt_norm_melt, id.vars="gene_id")
+colnames(gene_count_filt_norm_melt) = c("gene_id", "sample_id", "norm_count")
+
+# add version tag
+gene_count_filt_norm_melt = merge(gene_count_filt_norm_melt, expr_version_df)
+
+# order samples by median expression
+sample_order_df = data.frame(median_count = apply(gene_count_filt_norm, 2, median),
+                             sample_id = colnames(gene_count_filt_norm))
+sample_order_df = sample_order_df[order(sample_order_df$median_count),]
+
+# save the samples to remove
+SAMPLES_FILTERED_OUT = sample_order_df$sample_id[1:10]
+gene_count_filt_norm_melt$sample_id = factor(gene_count_filt_norm_melt$sample_id, 
+                                    levels = sample_order_df$sample_id)
+
+
+
+ggplot(gene_count_filt_norm_melt, aes(x=as.factor(sample_id), y=log10(norm_count+1), fill=version)) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    xlab("Sample IDs") + ylab("log10(norm_count+1)") +
+        ggtitle("filtered + normalized count distribution over gene for each sample")
+
+ggplot(gene_count_filt_norm_melt, aes(x=as.factor(sample_id), y=log10(norm_count+1), fill=re_seq)) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_blank()) +
+    xlab("Sample IDs") + ylab("log10(count+1)") +
+        ggtitle("count distribution over gene for each sample")
+
+ggplot(gene_count_filt_norm_melt, aes(x=as.factor(sample_id), y=log10(norm_count+1), fill=low_qual)) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_blank()) +
+    xlab("Sample IDs") + ylab("log10(count+1)") +
+        ggtitle("count distribution over gene for each sample")
+```
+
+Write out the data with the appropriate annotations
+
+```{r write_out_processed_data, echo=TRUE, warning=FALSE, message=F}
+
+
+samp_metadata = expr_version_df
+row.names(samp_metadata) = samp_metadata$sample_id
+samp_metadata = samp_metadata[colnames(gene_count),]
+
+# write out the table with sample level annotations
+gene_count_se = SummarizedExperiment(assays=list(counts=gene_count),
+                                        rowData=data.frame(gene_id=row.names(gene_count_new)), 
+                                        colData=samp_metadata)
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_gene_quant_full_annotated.RDS")
+saveRDS(gene_count_se, file = gene_expr_file)
+
+
+
+```
+
+Now lets do a PCA of ALL samples.
+
+```{r pca_filt_norm, fig.align='center', fig.width=10, fig.height=10, echo=FALSE, warning=FALSE, message=F}
+
+color_ver_df = expr_version_df
+colnames(color_ver_df)[2] = "Sample"
+plot_pca(gene_count_filt_norm, title = "Filtered+Normalized PCA",
+         color_df = color_ver_df, color_id = "version")
+
+plot_pca(gene_count_filt_norm, title = "Filtered+Normalized PCA",
+         color_df = color_ver_df, color_id = "re_seq")
+plot_pca(gene_count_filt_norm, title = "Filtered+Normalized PCA",
+         color_df = color_ver_df, color_id = "low_qual")
+
+```
+
+Now lets make a correlation map across samples.
+
+```{r corr_map, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq/salmon_quant_processed/salmon_gene_quant.RDS")
+
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/rna_sample_metadata.txt")
+rnaseq_dt_orig = format_rnaseq_data(rnaseq_expr_file, rnaseq_trans_file)
+
+
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_gene_quant_whites_filtered.RDS")
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/Doherty_Jen_Lab_20232023-03-20.txt")
+extra_meta_df = expr_version_df
+extra_meta_df$ID = gsub("Sample_", "", extra_meta_df$sample_id)
+extra_meta_df = extra_meta_df[,c("version", "ID", "re_seq", "low_qual")]
+rnaseq_dt_new = format_rnaseq_data(rnaseq_expr_file, 
+                                   rnaseq_trans_file, 
+                                   extra_meta_df,
+                                   isNCOCS=T)
+rnaseq_dt_orig$version = "pilot"
+rnaseq_dt_orig$re_seq = FALSE
+rnaseq_dt_orig$low_qual = FALSE
+
+rnaseq_dt = rbind(rnaseq_dt_orig, rnaseq_dt_new)
+rnaseq_dt$suid = as.character(rnaseq_dt$suid)
+
+# sample subtype annotation
+subtype_file = file.path(proj_dir, 
+                    "/reference_data/RNAseq_sample_selection_subtable_removed.tsv")
+subtype_dt = fread(subtype_file)
+subtype_dt = unique(subtype_dt[,c("suid", "HGSCsubtype")])
+subtype_dt$suid = as.character(subtype_dt$suid)
+
+total_dt = merge(subtype_dt, rnaseq_dt, all.y=T, by="suid")
+
+total_dt$HGSCsubtype[which(is.na(total_dt$HGSCsubtype))] = "unknown"
+
+
+
+
+# KEEP the samples that are from white women
+sample_ids_keep = paste0("Sample_", samp_exclusion_df$ID)
+sample_ids_keep = intersect(colnames(gene_count_orig), sample_ids_keep)
+sample_ids_keep = c(sample_ids_keep, colnames(gene_count_new))
+stopifnot(length(sample_ids_keep) == 316)
+sample_ids_keep = gsub("Sample_", "", sample_ids_keep)
+total_dt = subset(total_dt, ID %in% sample_ids_keep)
+
+
+samp_meta_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/sample_metadata_whites.tsv")
+samp_meta_df = subset(total_dt, select=-c(ensembl_gene_id, hgnc_symbol, expr))
+samp_meta_df = unique(samp_meta_df)
+write.table(samp_meta_df, samp_meta_file, quote=F, sep="\t", row.names=F)
+
+# to make comparable scale within each sample
+total_dt_scaled = total_dt %>%
+                        group_by(suid) %>%
+                        mutate(scaled_expr = scale(expr))
+
+# now dcast so we can analyze them
+total_dt_cast = dcast(total_dt_scaled, suid+ID+HGSCsubtype+version+re_seq+low_qual ~ ensembl_gene_id, 
+                      value.var="scaled_expr", fun.aggregate = mean)
+row.names(total_dt_cast) = total_dt_cast$suid
+
+# now plot heatmap across all genes
+expr_df = subset(total_dt_cast, select=-c(suid, ID, HGSCsubtype, version, re_seq, low_qual))
+
+annotation_row_df <- data.frame(subset(total_dt_cast, select=c(HGSCsubtype, version, re_seq, low_qual)))
+annotation_row_df$HGSCsubtype = as.factor(annotation_row_df$HGSCsubtype)
+annotation_row_df$version = as.factor(annotation_row_df$version)
+annotation_row_df$re_seq = as.factor(annotation_row_df$re_seq)
+annotation_row_df$low_qual = as.factor(annotation_row_df$low_qual)
+
+
+# now plot heatmap of correlation matrix
+cor_df <- cor(t(expr_df), method="spearman", use="complete.obs")
+pheatmap(cor_df, annotation_row = annotation_row_df, 
+         annotation_col = annotation_row_df, 
+         scale = "none", show_rownames = T,
+         show_colnames = F, cluster_cols = T, cluster_rows = T,
+         main = "Filtered+Normalized spearman corr. matr. all samples")
+
+
+
+```
+
+
+Now lets restrict the analysis to only look at the expression of the genes that are needed in the UBC classifier.
+First lets see how many of these genes have median expression > 0
+
+All genes pass.
+
+```{r ubc_filtering, fig.align='center', echo=FALSE, warning=FALSE, message=F}
+
+# get the UBC file
+ubc_file = file.path(proj_dir, "/reference_data/UBC_genes.txt")
+ubc_df <- data.frame(fread(ubc_file))
+
+# translate the gene names
+colnames(ubc_df)[1] = "hgnc_symbol"
+ubc_gene_ids_df = get_gene_id_map(unique(ubc_df$hgnc_symbol), 
+                                filter_type="hgnc_symbol",
+                                attributes= c("hgnc_symbol", "ensembl_gene_id"))
+
+
+gene_count_filt_norm_UBC = subset(total_dt, 
+                                  total_dt$ensembl_gene_id %in% 
+                                      ubc_gene_ids_df$ensembl_gene_id)
+
+# show the venn diagram
+display_venn(
+  list(ubc_gene_ids_df$ensembl_gene_id, rownames(gene_count_filt_norm)),
+  category.names = c("UBC" , "Filtered Genes"),
+  fill = c("#999999", "#009E73")
+  )
+
+print("Missing Genes")
+subset(ubc_gene_ids_df, 
+          !ubc_gene_ids_df$ensembl_gene_id %in% 
+           rownames(gene_count_filt_norm))
+
+duplicated_genes = ubc_gene_ids_df$hgnc_symbol[duplicated(ubc_gene_ids_df$hgnc_symbol)]
+print("Duplicated Genes due to ENSG translation")
+
+subset(ubc_gene_ids_df, 
+          ubc_gene_ids_df$hgnc_symbol %in% 
+           duplicated_genes)
+
+
+```
+
+Now re-do the analysis on this constricted set of genes and all samples
+
+```{r corr_map_ubc, fig.align='center', fig.width=10, fig.height=10, echo=FALSE, warning=FALSE, message=F}
+
+# now dcast so we can analyze them
+ubc_dt_cast = dcast(gene_count_filt_norm_UBC, suid+HGSCsubtype+version+re_seq+low_qual ~ ensembl_gene_id, value.var="expr")
+row.names(ubc_dt_cast) = ubc_dt_cast$suid
+
+# now plot heatmap across all genes
+ubc_expr_df = subset(ubc_dt_cast, select=-c(suid, HGSCsubtype, version, re_seq, low_qual))
+row.names(ubc_expr_df) = ubc_dt_cast$suid
+
+annotation_row_df <- data.frame(subset(ubc_dt_cast, select=c(HGSCsubtype, version, re_seq, low_qual)))
+annotation_row_df$HGSCsubtype = as.factor(annotation_row_df$HGSCsubtype)
+annotation_row_df$version = as.factor(annotation_row_df$version)
+annotation_row_df$re_seq = as.factor(annotation_row_df$re_seq)
+annotation_row_df$low_qual = as.factor(annotation_row_df$low_qual)
+row.names(annotation_row_df) = row.names(ubc_dt_cast)
+
+# now plot heatmap of correlation matrix
+cor_df <- data.frame(cor(t(ubc_expr_df), method="spearman"))
+row.names(cor_df) = row.names(ubc_expr_df)
+
+pheatmap(cor_df, annotation_row = annotation_row_df, 
+         scale = "none", show_rownames = T,
+         show_colnames = F, cluster_cols = T, cluster_rows = T,
+         main = "Filtered+Normalized spearman corr. matr.")
+
+
+# now plot pca
+pca_ubc_df = t(ubc_expr_df)
+colnames(pca_ubc_df) = paste0("Sample_", ubc_dt_cast$suid)
+color_df = subset(ubc_dt_cast, select=c(suid, HGSCsubtype, version, re_seq, low_qual))
+color_df$HGSCsubtype = as.factor(color_df$HGSCsubtype)
+color_df$version = as.factor(color_df$version)
+color_df$re_seq = as.factor(color_df$re_seq)
+color_df$low_qual = as.factor(color_df$low_qual)
+
+color_df$suid = paste0("Sample_", color_df$suid)
+colnames(color_df)[1] = "Sample"
+
+plot_pca(pca_ubc_df, title = "PCA of normalized genes, only UBC genes",
+         color_df = color_df, color_id = "HGSCsubtype")
+
+plot_pca(pca_ubc_df, title = "PCA of normalized genes, only UBC genes",
+         color_df = color_df, color_id = "version")
+
+plot_pca(pca_ubc_df, title = "PCA of normalized genes, only UBC genes",
+         color_df = color_df, color_id = "re_seq")
+
+plot_pca(pca_ubc_df, title = "PCA of normalized genes, only UBC genes",
+         color_df = color_df, color_id = "low_qual")
+
+plot_pca(pca_ubc_df, title = "PCA of normalized genes, only UBC genes")
+
+
+
+```
+
+

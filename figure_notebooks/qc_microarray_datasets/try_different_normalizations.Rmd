@@ -1,0 +1,420 @@
+---
+title: "mayo_kmeans"
+author: "Natalie Davidson"
+date: "9/21/2022"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("VennDiagram")
+require("RColorBrewer")
+require("Rtsne")
+
+library("curatedOvarianData")
+
+theme_set(theme_pubr())
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+
+set.seed(5)
+
+
+```
+
+
+## read in metadata
+
+```{r read_meta, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+# current cluster labels
+clust_id_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_all/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+clust_df = data.frame(fread(clust_id_file))
+colnames(clust_df)[1] = "ID"
+
+# original cluster labels
+old_file = file.path(proj_dir, 
+                    "/data/way_publication_results/033514_tables3.csv")
+
+old_df = data.frame(fread(old_file))
+
+# gene length
+gene_meta_file = file.path(proj_dir, 
+                    "/reference_data/temp_gene_lengths.tsv")
+gene_len_df = data.frame(fread(gene_meta_file))
+gene_len_df = gene_len_df[order(gene_len_df$Median, decreasing = T),]
+gene_len_df = gene_len_df[!duplicated(gene_len_df$HGNC.symbol),]
+
+# MAD genes used in clustering
+gene_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+gene_df <- data.frame(fread(gene_file))
+colnames(gene_df)[1] = "hgnc_symbol"
+
+
+```
+
+
+## plotting + reading methods
+
+```{r boxplots_method, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+
+read_format_expr <- function(in_df, metadata_table){
+    
+     rnaseq_expr_df = in_df
+
+    # format it so we can add metadata
+    gene_ids = row.names(rnaseq_expr_df)
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = sample_ids
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+
+plot_boxplot_expr <- function(in_df, in_genes, metadata_table, gene_len_df, col_name_interest, 
+                              col_plot_name, title_txt, xlab_txt, ylab_txt){
+        
+    # now plot the stats
+    gene_count_df = in_df[,in_genes]
+    gene_count_df$sample_id = in_df$ID
+    gene_count_melt <- melt(gene_count_df, id.vars="sample_id")
+    colnames(gene_count_melt) = c("ID", "gene_id", "count")
+    
+    # add version tag
+    gene_count_melt = merge(gene_count_melt, metadata_table, by="ID")
+    
+    # order samples by median expression
+    sample_order_df = data.frame(median_count = apply(in_df[,in_genes], 1, median),
+                                 ID = in_df$ID)
+    sample_order_df = sample_order_df[order(sample_order_df$median_count),]
+    gene_count_melt = merge(gene_count_melt, sample_order_df)
+    gene_count_melt$ID = factor(gene_count_melt$ID, 
+                                        levels = sample_order_df$ID)
+
+    col_idx = which(colnames(gene_count_melt) == col_name_interest)
+    colnames(gene_count_melt)[col_idx] = "fill_col"
+
+    # make the plot
+    med_df = unique(gene_count_melt[,c("ID", "fill_col", "median_count")])
+    gg1 = ggplot(med_df, aes(x=fill_col, y=median_count, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(col_plot_name) + ylab("median") +
+            labs(fill = col_plot_name) + theme(legend.position = "none")
+
+    return(gg1)
+
+}
+
+
+
+```
+
+
+
+
+## Make method for plotting all normalizations of the different normalizations
+
+```{r gene_read, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+    
+make_normalization_plots <- function(in_df, gene_df, metadata_table, gene_len_df){
+    
+    #############################
+    ## original clustering
+    #############################
+    
+    orig_kmeans_res = kmeans(in_df[,gene_df$hgnc_symbol], centers=2, nstart=10)
+    in_df$newKmeans_2 = orig_kmeans_res$cluster
+    
+    if(sum(in_df$newKmeans_2 != in_df$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+        in_df$newKmeans_2 = in_df$newKmeans_2-1
+        in_df$newKmeans_2[in_df$newKmeans_2 == 0] = 2
+    }
+    metadata_table = merge(metadata_table, in_df[,c("ID", "newKmeans_2")])
+    print(sum(in_df$newKmeans_2 == in_df$ClusterK2_kmeans))
+    
+    
+    ### make plot for K=2
+    subset_cols = c(colnames(metadata_table), gene_df$hgnc_symbol)
+    raw_gg = plot_boxplot_expr(in_df, gene_df$hgnc_symbol, metadata_table, gene_len_df,
+                      col_name_interest = "newKmeans_2", 
+                      col_plot_name = "newKmeans_2",
+                      title = "distribution for each sample", 
+                      xlab = "Samples", 
+                      ylab = "My new Kmeans")
+        
+    
+    
+    #############################
+    ## scaled clustering
+    #############################
+    
+    # now lets check if the clusters are similar
+    scale_kmeans_res = kmeans(scale(in_df[,gene_df$hgnc_symbol]), centers=2, nstart=10)
+    in_df$scaleKmeans_2 = scale_kmeans_res$cluster
+    
+    if(sum(in_df$scaleKmeans_2 != in_df$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+        in_df$scaleKmeans_2 = in_df$scaleKmeans_2-1
+        in_df$scaleKmeans_2[in_df$scaleKmeans_2 == 0] = 2
+    }
+    print(sum(in_df$scaleKmeans_2 == in_df$ClusterK2_kmeans))
+    metadata_table = merge(metadata_table, in_df[,c("ID", "scaleKmeans_2")])
+    
+    ### make plot for K=2
+    subset_cols = c(colnames(metadata_table), gene_df$hgnc_symbol)
+    scale_gg = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table, gene_len_df,
+                      col_name_interest = "scaleKmeans_2", 
+                      col_plot_name = "scaleKmeans_2",
+                      title = "distribution for each sample", 
+                      xlab = "Samples", 
+                      ylab = "My new Kmeans Scaled")
+        
+    #############################
+    ## gene-length normalized clustering
+    #############################
+        
+    # now scale by gene length
+    genes_len_intersect = intersect(gene_len_df$HGNC.symbol, gene_df$hgnc_symbol)
+    in_df_genenorm = in_df[,genes_len_intersect]
+    in_df_genenorm = t(in_df_genenorm)
+    
+    row.names(gene_len_df) = gene_len_df$HGNC.symbol
+    gene_len_df = gene_len_df[genes_len_intersect,]
+    
+    sum(row.names(gene_len_df) != row.names(in_df_genenorm))
+    in_df_norm = t(in_df_genenorm / gene_len_df$Median)
+    in_df_norm = in_df_norm*1000
+    in_df_norm = cbind(in_df[,1:14], in_df_norm)
+    
+    
+    # now lets check if the clusters are similar
+    scale_kmeans_res = kmeans(in_df_norm[,genes_len_intersect], centers=2, nstart=10)
+    in_df_norm$geneNormKmeans_2 = scale_kmeans_res$cluster
+    
+    if(sum(in_df_norm$geneNormKmeans_2 != in_df_norm$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+        in_df_norm$geneNormKmeans_2 = in_df_norm$geneNormKmeans_2-1
+        in_df_norm$geneNormKmeans_2[in_df_norm$geneNormKmeans_2 == 0] = 2
+    }
+    print(sum(in_df_norm$geneNormKmeans_2 == in_df_norm$ClusterK2_kmeans))
+    print(length(in_df_norm$geneNormKmeans_2))
+    metadata_table = merge(metadata_table, in_df_norm[,c("ID", "geneNormKmeans_2")])
+    
+    
+    ### make plot for K=2
+    length_gg = plot_boxplot_expr(in_df_norm, genes_len_intersect, metadata_table, gene_len_df,
+                      col_name_interest = "geneNormKmeans_2", 
+                      col_plot_name = "geneNormKmeans_2",
+                      title = "distribution for each sample", 
+                      xlab = "Samples", 
+                      ylab = "My new Kmeans Gene Length Normalized")
+        
+    
+    ##########################################################
+    ## scaled + gene-length normalized clustering
+    ##########################################################
+       
+    # now lets check if the clusters are similar
+    scale_kmeans_res = kmeans(scale(in_df_norm[,genes_len_intersect]), centers=2, nstart=10)
+    in_df_norm$scaledGeneNormKmeans_2 = scale_kmeans_res$cluster
+    
+    if(sum(in_df_norm$scaledGeneNormKmeans_2 != in_df_norm$ClusterK2_kmeans) > length(in_df$ClusterK2_kmeans)/2){
+        in_df_norm$scaledGeneNormKmeans_2 = in_df_norm$scaledGeneNormKmeans_2-1
+        in_df_norm$scaledGeneNormKmeans_2[in_df_norm$scaledGeneNormKmeans_2 == 0] = 2
+    }
+    print(sum(in_df_norm$scaledGeneNormKmeans_2 == in_df_norm$ClusterK2_kmeans))
+    metadata_table = merge(metadata_table, in_df_norm[,c("ID", "scaledGeneNormKmeans_2")])
+    
+    ### make plot for K=2
+    scale_length_gg = plot_boxplot_expr(in_df_norm, genes_len_intersect, metadata_table, gene_len_df,
+                      col_name_interest = "scaledGeneNormKmeans_2", 
+                      col_plot_name = "scaledGeneNormKmeans_2",
+                      title = "distribution for each sample", 
+                      xlab = "Samples", 
+                      ylab = "My new Kmeans Scaled + Gene length")
+
+    full_plot = ggarrange(raw_gg, scale_gg, length_gg, scale_length_gg, ncol=4)
+
+    return(list(full_plot, metadata_table))
+
+}
+ 
+```
+
+
+
+## Analyze Mayo
+
+```{r read_mayo, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+mayo_data = load(file=file.path(proj_dir, 
+                                "/data/mayo/MayoEset.Rda"))
+
+ExpressionData <- get(mayo_data)
+mayo_dta <- exprs(ExpressionData)
+
+# read in the metadata
+mayo_metadata_table = subset(clust_df, Dataset == "mayo.eset")
+
+# format the expr table
+res = read_format_expr(mayo_dta, mayo_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+res = make_normalization_plots(in_df, gene_df, mayo_metadata_table, gene_len_df)
+mayo_gg = res[[1]]
+mayo_metadata_table = res[[2]]
+mayo_gg
+
+print("-----No Correction MAD-----")
+print(table(mayo_metadata_table$newKmeans_2, mayo_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Scaled-----")
+print(table(mayo_metadata_table$scaleKmeans_2, mayo_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Gene normalized-----")
+print(table(mayo_metadata_table$geneNormKmeans_2, mayo_metadata_table$ClusterK2_kmeans))
+
+print("-----Gene normalized and scales-----")
+print(table(mayo_metadata_table$scaledGeneNormKmeans_2, mayo_metadata_table$ClusterK2_kmeans))
+
+
+
+```
+
+## Analyze Tothill
+
+```{r read_tothill, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+tothill_data = data(GSE9891_eset)
+ExpressionData <- get(tothill_data)
+tothill_dta <- exprs(ExpressionData)
+
+tothill_metadata_table = subset(clust_df, Dataset == "Tothill")
+
+# format the expr table
+res = read_format_expr(tothill_dta, tothill_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+res = make_normalization_plots(in_df, gene_df, tothill_metadata_table, gene_len_df)
+tothill_gg = res[[1]]
+tothill_metadata_table = res[[2]]
+tothill_gg
+
+print("-----No Correction MAD-----")
+print(table(tothill_metadata_table$newKmeans_2, tothill_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Scaled-----")
+print(table(tothill_metadata_table$scaleKmeans_2, tothill_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Gene normalized-----")
+print(table(tothill_metadata_table$geneNormKmeans_2, tothill_metadata_table$ClusterK2_kmeans))
+
+print("-----Gene normalized and scales-----")
+print(table(tothill_metadata_table$scaledGeneNormKmeans_2, tothill_metadata_table$ClusterK2_kmeans))
+
+
+
+```
+
+
+## Analyze TCGA
+
+```{r read_tcga, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+tcga_data = data(TCGA_eset)
+ExpressionData <- get(tcga_data)
+tcga_dta <- exprs(ExpressionData)
+
+tcga_metadata_table = subset(clust_df, Dataset == "TCGA")
+
+# format the expr table
+res = read_format_expr(tcga_dta, tcga_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+res = make_normalization_plots(in_df, gene_df, tcga_metadata_table, gene_len_df)
+tcga_gg = res[[1]]
+tcga_metadata_table = res[[2]]
+tcga_gg
+
+print("-----No Correction MAD-----")
+print(table(tcga_metadata_table$newKmeans_2, tcga_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Scaled-----")
+print(table(tcga_metadata_table$scaleKmeans_2, tcga_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Gene normalized-----")
+print(table(tcga_metadata_table$geneNormKmeans_2, tcga_metadata_table$ClusterK2_kmeans))
+
+print("-----Gene normalized and scales-----")
+print(table(tcga_metadata_table$scaledGeneNormKmeans_2, tcga_metadata_table$ClusterK2_kmeans))
+
+
+
+```
+
+
+## Analyze Yoshihara
+
+```{r read_yoshihara, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+yoshihara_data = data(GSE32062.GPL6480_eset)
+ExpressionData <- get(yoshihara_data)
+yoshihara_dta <- exprs(ExpressionData)
+
+yoshihara_metadata_table = subset(clust_df, Dataset == "Yoshihara")
+
+# format the expr table
+res = read_format_expr(yoshihara_dta, yoshihara_metadata_table)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+res = make_normalization_plots(in_df, gene_df, yoshihara_metadata_table, gene_len_df)
+yoshihara_gg = res[[1]]
+yoshihara_metadata_table = res[[2]]
+yoshihara_gg
+
+print("-----No Correction MAD-----")
+print(table(yoshihara_metadata_table$newKmeans_2, yoshihara_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Scaled-----")
+print(table(yoshihara_metadata_table$scaleKmeans_2, yoshihara_metadata_table$ClusterK2_kmeans))
+
+
+print("-----Gene normalized-----")
+print(table(yoshihara_metadata_table$geneNormKmeans_2, yoshihara_metadata_table$ClusterK2_kmeans))
+
+print("-----Gene normalized and scales-----")
+print(table(yoshihara_metadata_table$scaledGeneNormKmeans_2, yoshihara_metadata_table$ClusterK2_kmeans))
+
+
+
+```
+

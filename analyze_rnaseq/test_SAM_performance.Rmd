@@ -1,0 +1,362 @@
+---
+title: "test_SAM_performance"
+author: "Natalie Davidson"
+date: "22/06/2022"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("SummarizedExperiment")
+require("ggrepel")
+require("RColorBrewer")
+
+require("seqgendiff")
+require("DESeq2")
+require("limma")
+require("sva")
+require("qvalue")
+require("siggenes")
+require("ROCR")
+
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+set.seed(5)
+
+```
+
+## run simulated DE on data from Way pipeline
+
+### get RNA-Seq data to be run in Way pipeline 
+
+The goal of this notebook is to see if the RNA-Seq data from the new AACES study
+can be run in the Way pipeline. Currently, the Way pipeline performs a 
+differential expression test that identifies differentially expressed genes
+between clusters. The pipeline currently assumes microarray data and uses SAM to perform
+the test. So we will compare results using SAM and two other RNA-Seq specific methods.
+If SAM performs reasonably well in comparison to the other methods, we will continue using SAM.
+
+Comparison will be done on: 
+
+1) SAM using log10(RNA-Seq counts)
+2) EdgerR using normalized counts
+3) DESeq using raw counts
+
+```{r get_airway_sample, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline.tsv")
+aaces_df = data.frame(fread(gene_expr_file))
+aaces_matr = as.matrix(aaces_df[,2:ncol(aaces_df)])
+
+
+
+```
+
+### simulate differential expression
+
+We are using binomial thinning on our input data in order to simulate
+differential expression between two randomly partitioned groups.
+
+```{r airway_sample, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+thinout <- thin_2group(mat = ceiling(aaces_matr), 
+                     prop_null = 0.5, 
+                     signal_fun = stats::rnorm,
+                     signal_params = list(mean = 0, sd = 0.8))
+
+## 90 percent of genes are null 
+## i.e. 90% are not differential
+mean(abs(thinout$coef) < 10^-6)
+
+
+```
+
+
+### run SAM
+
+Now run the differential expression test
+
+```{r run_sam, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+in_df = data.frame(log10(thinout$mat+1))
+curr_method = d.stat
+cond_vec = as.vector(thinout$designmat)
+
+res = sam(data = in_df, cl=cond_vec, method = curr_method)
+
+plot(thinout$coefmat, log2(res@fold), xlab = "log2-fold change", ylab = "SAM Estimated log2-fold change")
+abline(0, 1, col = 2, lwd = 2)
+
+res_df = data.frame(p_val = res@p.value, 
+                    p_adj = p.adjust(res@p.value, method = "bonferroni"),
+                    log2FC = log2(res@fold),
+                    true_diff = as.numeric(abs(thinout$coefmat) > 10^-6))
+res_df = na.omit(res_df)
+pred <- prediction(1-res_df$p_val, res_df$true_diff)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf,
+     avg= "threshold",
+     colorize=TRUE,
+     lwd= 3,
+     main= "SAM ROC")
+perf <- performance(pred, "prec", "rec")
+plot(perf,
+     avg= "threshold",
+     colorize=TRUE,
+     lwd= 3,
+     main= "Sam PR Curve")
+
+
+```
+
+
+### check SAM
+
+Since we have ground truth, report the performance
+
+```{r check_sam, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+library(caret)
+confusionMatrix(as.factor(res_df$true_diff), 
+                as.factor(as.numeric(res_df$p_val < 0.05)),
+                positive="1")
+    
+
+```
+
+
+### make SAM QQ
+
+Check test calibration
+
+```{r make_sam_QQ, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+plot_df = res_df
+plot_df$negLog10pval = -1*log10(res_df$p_val+10^-6)
+plot_df = plot_df[order(plot_df$negLog10pval, decreasing=T),]
+
+
+# plot only proteins with true log2FC == 0
+plot_df = subset(plot_df, true_diff == 0) # filter proteins with log2FC == 0
+
+n = nrow(plot_df)
+plot_df$idx = -1*log10((1:n)/n)
+plot_df$clower = -log10(qbeta(p = (1 + 0.95) / 2, shape1 = 1:n, shape2 = n:1))
+plot_df$cupper = -log10(qbeta(p = (1 - 0.95) / 2, shape1 = 1:n, shape2 = n:1))
+plot_df$under = plot_df$negLog10pval < plot_df$clower
+plot_df$over = plot_df$negLog10pval > plot_df$cupper
+gg_qq_null = ggplot(plot_df, aes(x=idx, y=negLog10pval)) +  # only use black
+    geom_abline(intercept = 0, slope = 1) +
+    geom_point() +
+    geom_line(aes(idx, cupper), linetype = 2) +
+    geom_line(aes(idx, clower), linetype = 2)+
+    ggtitle("qqplot of p-values Null") +
+    theme_bw() + labs(x ="Expected (-log10)", y = "Observed (-log10)")
+gg_qq_null
+
+```
+
+
+
+### run limma-voom
+
+Now run the differential expression test using edgeR
+
+```{r run_limma_voom, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+# limma-voom code is taken from
+# this tutorial: https://ucdavis-bioinformatics-training.github.io/2018-June-RNA-Seq-Workshop/thursday/DE.html
+# https://bioconductor.org/packages/release/workflows/vignettes/RNAseq123/inst/doc/designmatrices.html#design-and-contrast-matrices
+
+library(edgeR)
+
+
+group <- as.factor(cond_vec)
+design <- model.matrix(~0+group)
+contrasts <- makeContrasts(group0-group1, levels=colnames(design)) 
+v <- voom(thinout$mat, design)
+fit <- lmFit(v, design)
+fit <- contrasts.fit(fit, contrasts)
+fit <- eBayes(fit)
+top.table <- topTable(fit, sort.by = "P", n = Inf)
+
+
+plot(thinout$coefmat, top.table$logFC, xlab = "log2-fold change", ylab = "limma-voom Estimated log2-fold change")
+abline(0, 1, col = 2, lwd = 2)
+
+res_df = data.frame(p_val = top.table$P.Value, 
+                    p_adj = p.adjust(top.table$P.Value, method = "bonferroni"),
+                    log2FC = top.table$logFC,
+                    true_diff = as.numeric(abs(thinout$coefmat) > 10^-6))
+
+pred <- prediction(1-res_df$p_val, res_df$true_diff)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf,
+     avg= "threshold",
+     colorize=TRUE,
+     lwd= 3,
+     main= "EdgeR ROC")
+perf <- performance(pred, "prec", "rec")
+plot(perf,
+     avg= "threshold",
+     colorize=TRUE,
+     lwd= 3,
+     main= "EdgeR PR Curve")
+
+
+```
+
+
+### QC
+
+Check performance
+
+```{r check_voom, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+library(caret)
+confusionMatrix(as.factor(res_df$true_diff), 
+                as.factor(as.numeric(res_df$p_val < 0.05)),
+                positive="1")
+    
+
+```
+
+
+### make limma-voom QQ
+
+check calibration
+
+```{r make_limma_voom_QQ, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+plot_df = res_df
+plot_df$negLog10pval = -1*log10(res_df$p_val+10^-6)
+plot_df = plot_df[order(plot_df$negLog10pval, decreasing=T),]
+
+
+# plot only proteins with true log2FC == 0
+plot_df = subset(plot_df, true_diff == 0) # filter proteins with log2FC == 0
+
+n = nrow(plot_df)
+plot_df$idx = -1*log10((1:n)/n)
+plot_df$clower = -log10(qbeta(p = (1 + 0.95) / 2, shape1 = 1:n, shape2 = n:1))
+plot_df$cupper = -log10(qbeta(p = (1 - 0.95) / 2, shape1 = 1:n, shape2 = n:1))
+plot_df$under = plot_df$negLog10pval < plot_df$clower
+plot_df$over = plot_df$negLog10pval > plot_df$cupper
+gg_qq_null = ggplot(plot_df, aes(x=idx, y=negLog10pval)) +  # only use black
+    geom_abline(intercept = 0, slope = 1) +
+    geom_point() +
+    geom_line(aes(idx, cupper), linetype = 2) +
+    geom_line(aes(idx, clower), linetype = 2)+
+    ggtitle("qqplot of p-values Null") +
+    theme_bw() + labs(x ="Expected (-log10)", y = "Observed (-log10)")
+gg_qq_null
+
+```
+
+
+
+### run DESeq
+
+Now run the differential expression test using DESeq2
+
+
+```{r run_DESeq, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+library(DESeq2)
+
+dds <- DESeqDataSetFromMatrix(countData = thinout$mat,
+                              colData = data.frame(cond=as.factor(cond_vec)),
+                              design= ~ cond)
+dds <- DESeq(dds)
+resultsNames(dds) # lists the coefficients
+res <- results(dds, name="cond_1_vs_0")
+
+plot(thinout$coefmat, res$log2FoldChange, xlab = "log2-fold change", ylab = "deseq Estimated log2-fold change")
+
+abline(0, 1, col = 2, lwd = 2)
+
+res_df = data.frame(p_val = res$pvalue, 
+                    p_adj = res$padj,
+                    log2FC = res$log2FoldChange,
+                    true_diff = as.numeric(abs(thinout$coefmat) > 10^-6))
+res_df = na.omit(res_df)
+pred <- prediction(1-res_df$p_val, res_df$true_diff)
+perf <- performance(pred, "tpr", "fpr")
+plot(perf,
+     avg= "threshold",
+     colorize=TRUE,
+     lwd= 3,
+     main= "DESeq2 ROC curve ...")
+perf <- performance(pred, "prec", "rec")
+plot(perf,
+     avg= "threshold",
+     colorize=TRUE,
+     lwd= 3,
+     main= "DESeq2 Precision/Recall")
+
+
+```
+
+
+### QC DESeq
+
+get performance
+
+```{r check_deseq, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+library(caret)
+confusionMatrix(as.factor(res_df$true_diff), 
+                as.factor(as.numeric(res_df$p_val < 0.05)),
+                positive="1")
+    
+
+```
+
+
+### make DESeq2 QQ
+
+check calibrations
+
+```{r make_deseq2_QQ, fig.align='center', fig.width=5, fig.height=5, echo=FALSE, warning=FALSE, message=F}
+
+plot_df = res_df
+plot_df$negLog10pval = -1*log10(res_df$p_val+10^-6)
+plot_df = plot_df[order(plot_df$negLog10pval, decreasing=T),]
+
+
+# plot only proteins with true log2FC == 0
+plot_df = subset(plot_df, true_diff == 0) # filter proteins with log2FC == 0
+
+n = nrow(plot_df)
+plot_df$idx = -1*log10((1:n)/n)
+plot_df$clower = -log10(qbeta(p = (1 + 0.95) / 2, shape1 = 1:n, shape2 = n:1))
+plot_df$cupper = -log10(qbeta(p = (1 - 0.95) / 2, shape1 = 1:n, shape2 = n:1))
+plot_df$under = plot_df$negLog10pval < plot_df$clower
+plot_df$over = plot_df$negLog10pval > plot_df$cupper
+gg_qq_null = ggplot(plot_df, aes(x=idx, y=negLog10pval)) +  # only use black
+    geom_abline(intercept = 0, slope = 1) +
+    geom_point() +
+    geom_line(aes(idx, cupper), linetype = 2) +
+    geom_line(aes(idx, clower), linetype = 2)+
+    ggtitle("qqplot of p-values Null") +
+    theme_bw() + labs(x ="Expected (-log10)", y = "Observed (-log10)")
+gg_qq_null
+
+```
+
+### Conclusion
+
+In conclusion, we find that SAM performs equally as well as DESeq2 and outperforms 
+edgeR. Therefore, we will keep using SAM and make sure we log10 the RNA-Seq counts.
+
+
+

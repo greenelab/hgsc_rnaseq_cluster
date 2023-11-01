@@ -1,0 +1,415 @@
+---
+title: "sample_heatmap_annotatedd"
+author: "Natalie Davidson"
+date: "9/20/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("SummarizedExperiment")
+require("ggrepel")
+require("RColorBrewer")
+require("readr")
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+set.seed(5)
+
+```
+
+
+# Intro
+
+In this notebook we will make a main metadata table to track all metadata associated with the RNA-Seq samples.
+
+## External Info
+
+Here we incorporate metadata from the sequencing core.
+
+```{r seq_cor_meta, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+
+#The following samples failed: 
+
+samps_failed = c("19291X9", "19291X35", "19291X57", "19291X124", "19291X175",
+                 "20160X13")
+failed_df = data.frame(metric=rep("failed", length(samps_failed)),
+                       samp_ids = samps_failed)
+
+
+#The following samples were re-sequenced to get higher yeild:
+samps_reseq = c("19291X8", "19291X20", "19291X36", "19291X37", 
+                 "19291X43", "19291X60", "19291X165", "19291X187",
+                "19291X188", "19291X205", "19291X206", "19291X258", 
+                "19291X262", "19291X263",
+                "20160X104", "20160X106", "20160X110", 
+                "20160X112", "20160X252", "20160X253", 
+                "20160X255", "20160X259")
+re_seq_df = data.frame(metric=rep("re_seq", length(samps_reseq)),
+                       samp_ids = samps_reseq)
+
+
+#The following samples got fewer than 35M reads
+samps_35M = c("19291X20", "19291X26", "19291X36", "19291X40", 
+              "19291X73", "19291X100", "19291X109", "19291X165", 
+              "19291X297", "19291X303")
+u35M_df = data.frame(metric=rep("low_qual", length(samps_35M)),
+                       samp_ids = samps_35M)
+
+#The following samples were loq quality white samples
+samps_low_qual = c("20160X107", "20160X169", "20160X171", 
+                    "20160X178", "20160X185", "20160X216", 
+                    "20160X217", "20160X234", "20160X254", 
+                    "20160X256", "20160X260", "20160X262")
+low_qual_df = data.frame(metric=rep("low_qual", length(samps_low_qual)),
+                       samp_ids = samps_low_qual)
+
+
+# the following had low starting material
+samps_low_start = c("19291X38", "19291X39", "19291X40", 
+                    "19291X43", "19291X57", "19291X60", 
+                    "19291X100", "19291X102", "19291X108", 
+                    "19291X124", "19291X164", "19291X175", 
+                    "19291X178", "19291X190", "19291X197", 
+                    "19291X206", "19291X227", "19291X236", 
+                    "19291X237", "19291X247", "19291X250", 
+                    "19291X252", "19291X276", "19291X293", 
+                    "19291X297")
+low_start_df = data.frame(metric=rep("low_qual", length(samps_low_start)),
+                       samp_ids = samps_low_start)
+
+#combine low quality metrics to one df
+low_qual_df = rbind(u35M_df, low_qual_df)
+low_qual_df = rbind(low_start_df, low_qual_df)
+low_qual_df = unique(low_qual_df)
+
+qc_degradation = merge(failed_df, re_seq_df, by="samp_ids", all=T)
+qc_degradation = merge(qc_degradation, low_qual_df, by="samp_ids", all=T)
+colnames(qc_degradation) = c("ID", "failed_seq", "resequenced", "low_qual")
+
+
+```
+
+## Read in AA expression tables
+
+Now lets read in all the expression and metadata to get the total amount of samples sequenced.
+
+```{r read_expr, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+# read in pilot samples
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq/salmon_quant_processed/salmon_gene_quant.RDS")
+
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/rna_sample_metadata.txt")
+rnaseq_dt_orig = format_rnaseq_data(rnaseq_expr_file, rnaseq_trans_file)
+rnaseq_dt_orig = unique(rnaseq_dt_orig[,c("suid", "ID")])
+assertthat::are_equal(nrow(rnaseq_dt_orig), 47)
+rnaseq_dt_orig$version = "pilot"
+
+# read in full sample run
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_full/salmon_quant_processed/salmon_gene_quant.RDS")
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/AACES_FFPE_RNA_JeffMarks_Doherty.tsv")
+rnaseq_dt_new = format_rnaseq_data(rnaseq_expr_file, 
+                                   rnaseq_trans_file)
+rnaseq_dt_new = unique(rnaseq_dt_new[,c("suid", "ID")])
+assertthat::are_equal(nrow(rnaseq_dt_new), 301)
+rnaseq_dt_new$version = "full_run"
+
+
+rnaseq_dt = rbind(rnaseq_dt_orig, rnaseq_dt_new)
+rnaseq_dt$suid = as.character(rnaseq_dt$suid)
+
+head(rnaseq_dt)
+
+
+
+
+```
+
+
+## Add in AA annotations
+
+
+```{r add_annot, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+# add in the external info from the sequencing core
+total_dt = merge(qc_degradation, rnaseq_dt, all.y=T, by="ID")
+assertthat::are_equal(nrow(total_dt), 348) # 5 samples failed, 301+47+5 = 353
+
+
+# sample subtype annotation
+subtype_file = file.path(proj_dir, 
+                    "/reference_data/RNAseq_sample_selection_subtable_removed.tsv")
+subtype_dt = fread(subtype_file)
+subtype_dt = unique(subtype_dt[,c("suid", "HGSCsubtype")])
+colnames(subtype_dt)[2] = "external_HGSCsubtype_estimate"
+subtype_dt$suid = as.character(subtype_dt$suid)
+
+total_dt = merge(subtype_dt, total_dt, all.y=T, by="suid")
+assertthat::are_equal(nrow(total_dt), 348) 
+
+
+
+################################################
+# remove the samples that are from white women
+################################################
+# read in the samples that should be excluded
+# we will remove all samples that are from white women
+samp_exclusion_file = file.path(proj_dir, 
+                    "/reference_data/way_exclusions.csv")
+samp_exclusion_df = data.frame(fread(samp_exclusion_file))
+samp_exclusion_df = subset(samp_exclusion_df, exclude_white==TRUE)
+
+# add annot
+sample_ids_remove = samp_exclusion_df$ID
+stopifnot(length(sample_ids_remove) == 23)
+total_dt$REMOVE_WHITE = NA
+total_dt$REMOVE_WHITE[total_dt$ID %in% sample_ids_remove] = TRUE
+
+################################################
+# remove neoadjuvant samples
+################################################
+neoadj_file = file.path(proj_dir, 
+                    "/reference_data/tissuegrant_epidata_08102022.csv")
+neoadj_df = data.frame(fread(neoadj_file))
+neoadj_df = subset(neoadj_df, neoadj=="yes")
+
+sample_ids_remove = neoadj_df$suid
+stopifnot(length(sample_ids_remove) == 53)
+total_dt$REMOVE_NEOADJ = NA
+total_dt$REMOVE_NEOADJ[total_dt$suid %in% sample_ids_remove] = TRUE
+
+
+# read in previously generated metadata table to get low expression samples
+samp_meta_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/way_pipeline_samples_removed.tsv")
+prev_meta_df = data.frame(fread(samp_meta_file))
+low_expr_vec = prev_meta_df$x
+low_expr_vec = gsub("Sample_", "", low_expr_vec)
+stopifnot(length(low_expr_vec) == 10)
+total_dt$REMOVE_LOW_EXPRESSION = NA
+total_dt$REMOVE_LOW_EXPRESSION[total_dt$ID %in% low_expr_vec] = TRUE
+
+
+
+```
+
+
+## Read in Whites expression tables
+
+Now lets read in all the expression and metadata to get the total amount of samples sequenced.
+
+```{r read_expr_whites, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq/salmon_quant_processed/salmon_gene_quant.RDS")
+
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/rna_sample_metadata.txt")
+rnaseq_dt_orig = format_rnaseq_data(rnaseq_expr_file, rnaseq_trans_file)
+rnaseq_dt_orig = unique(rnaseq_dt_orig[,c("suid", "ID")])
+assertthat::are_equal(nrow(rnaseq_dt_orig), 47)
+rnaseq_dt_orig$version = "pilot"
+
+
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_gene_quant_whites_filtered.RDS")
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/Doherty_Jen_Lab_20232023-03-20.txt")
+
+rnaseq_dt_new = format_rnaseq_data(rnaseq_expr_file, 
+                                   rnaseq_trans_file, 
+                                   NA,
+                                   isNCOCS=T)
+rnaseq_dt_new = unique(rnaseq_dt_new[,c("suid", "ID")])
+assertthat::are_equal(nrow(rnaseq_dt_new), 293) #294 sequenced, 1 failed
+rnaseq_dt_new$version = "full_run"
+
+rnaseq_white_dt = rbind(rnaseq_dt_orig, rnaseq_dt_new)
+rnaseq_white_dt$suid = as.character(rnaseq_white_dt$suid)
+
+assertthat::are_equal(length(which(duplicated(rnaseq_white_dt$ID))), 0) 
+assertthat::are_equal(nrow(rnaseq_white_dt), 340) #293+47 
+
+head(rnaseq_white_dt)
+
+
+```
+
+
+## Add in Whites annotations
+
+
+```{r add_annot_white, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+# add in the external info from the sequencing core
+total_white_dt = merge(qc_degradation, rnaseq_white_dt, all.y=T, by="ID")
+assertthat::are_equal(nrow(total_white_dt), 340) # 
+
+
+# sample subtype annotation
+subtype_file = file.path(proj_dir, 
+                    "/reference_data/RNAseq_sample_selection_subtable_removed.tsv")
+subtype_dt = fread(subtype_file)
+subtype_dt = unique(subtype_dt[,c("suid", "HGSCsubtype")])
+colnames(subtype_dt)[2] = "external_HGSCsubtype_estimate"
+subtype_dt$suid = as.character(subtype_dt$suid)
+
+total_white_dt = merge(subtype_dt, total_white_dt, all.y=T, by="suid")
+assertthat::are_equal(nrow(total_white_dt), 340) 
+
+
+
+
+
+
+################################################
+# KEEP the samples that are from white women
+################################################
+# read in the samples that should be excluded
+# we will remove all samples that are from white women
+samp_exclusion_file = file.path(proj_dir, 
+                    "/reference_data/way_exclusions.csv")
+samp_exclusion_df = data.frame(fread(samp_exclusion_file))
+samp_exclusion_df = subset(samp_exclusion_df, exclude_white==TRUE)
+
+# add annot
+# KEEP the samples that are from white women
+sample_ids_keep = unique(samp_exclusion_df$ID)
+sample_ids_keep = intersect(unique(rnaseq_dt_orig$ID), sample_ids_keep)
+sample_ids_keep = c(sample_ids_keep, unique(rnaseq_dt_new$ID))
+stopifnot(length(sample_ids_keep) == 316)
+total_white_dt$REMOVE_BLACK = TRUE
+total_white_dt$REMOVE_BLACK[total_white_dt$ID %in% sample_ids_keep] = NA
+
+# read in previously generated metadata table to get low expression samples
+samp_meta_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/way_pipeline_samples_removed_whites.tsv")
+prev_meta_df = data.frame(fread(samp_meta_file))
+low_expr_vec = prev_meta_df$x
+low_expr_vec = gsub("Sample_", "", low_expr_vec)
+stopifnot(length(low_expr_vec) == 5)
+total_white_dt$REMOVE_LOW_EXPRESSION = NA
+total_white_dt$REMOVE_LOW_EXPRESSION[total_white_dt$ID %in% low_expr_vec] = TRUE
+
+
+
+```
+
+
+## Merge together AA+White samples
+
+
+```{r join_cohorts, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+assertthat::are_equal(length(intersect(total_dt$ID, total_white_dt$ID)), 47) # 47 from pilot
+total_dt$study = "AA"
+total_white_dt$study = "white"
+
+
+```
+
+
+## Add in AA subtype estimates from way pipeline
+
+
+```{r add_subtypes, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+
+# way pipeline subtype annotation
+subtype_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+subtype_dt = fread(subtype_file)
+subtype_dt = subset(subtype_dt, Dataset == "aaces.rnaseq.eset")
+
+# format the sample IDs
+colnames(subtype_dt)[1] = "ID"
+subtype_dt$ID = gsub("Sample_", "", subtype_dt$ID)
+
+# add in the TCGA names for kmeans k=4
+subtype_dt$ClusterK4_kmeans_TCGA_names = subtype_dt$ClusterK4_kmeans
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 1] = "Mesenchymal"
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 2] = "Proliferative"
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 3] = "Immunoreactive"
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 4] = "Differentiated"
+
+
+total_dt = merge(subtype_dt, total_dt, all=T, by="ID")
+stopifnot(nrow(total_dt) == 348)
+
+# write out the ones that were run in the pipeline
+colnames(total_dt)[2] = "ran_in_way_pipeline"
+total_dt$ran_in_way_pipeline[!is.na(total_dt$ran_in_way_pipeline)] = TRUE
+
+```
+
+
+## Add in White subtype estimates from way pipeline
+
+
+```{r add_subtypes2, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+
+# way pipeline subtype annotation
+subtype_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+subtype_dt = fread(subtype_file)
+subtype_dt = subset(subtype_dt, Dataset == "aaces.white.rnaseq.eset")
+
+# format the sample IDs
+colnames(subtype_dt)[1] = "ID"
+subtype_dt$ID = gsub("Sample_", "", subtype_dt$ID)
+
+# add in the TCGA names for kmeans k=4
+subtype_dt$ClusterK4_kmeans_TCGA_names = subtype_dt$ClusterK4_kmeans
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 1] = "Mesenchymal"
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 2] = "Proliferative"
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 3] = "Immunoreactive"
+subtype_dt$ClusterK4_kmeans_TCGA_names[subtype_dt$ClusterK4_kmeans_TCGA_names == 4] = "Differentiated"
+
+
+total_white_dt = merge(subtype_dt, total_white_dt, all=T, by="ID")
+stopifnot(nrow(total_white_dt) == 340)
+
+# write out the ones that were run in the pipeline
+colnames(total_white_dt)[2] = "ran_in_way_pipeline"
+total_white_dt$ran_in_way_pipeline[!is.na(total_white_dt$ran_in_way_pipeline)] = TRUE
+
+```
+
+
+## Write it out
+
+
+```{r write_annot, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_AA_metadata_table.tsv")
+write.table(total_dt, samp_meta_file, quote=F, sep="\t", row.names=F)
+
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_white_metadata_table.tsv")
+write.table(total_white_dt, samp_meta_file, quote=F, sep="\t", row.names=F)
+
+
+# check correlation of clusters with original data
+samp_orig_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_metadata_table.tsv")
+new_k4 = data.frame(fread(samp_orig_meta_file))
+a = merge(na.omit(total_dt[,c("ID", "ClusterK4_kmeans")]), na.omit(new_k4[,c("ID", "ClusterK4_kmeans")]), by="ID")
+cor(a$ClusterK4_kmeans.x, a$ClusterK4_kmeans.y)
+sum(a$ClusterK4_kmeans.x != a$ClusterK4_kmeans.y)
+
+```
+
+

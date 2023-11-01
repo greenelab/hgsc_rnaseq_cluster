@@ -1,0 +1,140 @@
+---
+title: "recreate_figs_1_2"
+author: "Natalie Davidson"
+date: "8/15/2021"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("networkD3")
+require("dplyr")
+theme_set(theme_pubr())
+
+proj_dir = here()
+
+set.seed(5)
+
+```
+# Make Sankey Diagram
+
+Show how clusters are broken up across datasets
+
+## First get file paths
+
+```{r get_sankey_file, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+sankey_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_all/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+sankey_df = data.frame(fread(sankey_file))
+
+
+```
+
+
+## Plotting method
+
+```{r get_sankey_fig, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+get_sankey_df <- function(sankey_df, dataset){
+    
+    curr_df = subset(sankey_df, Dataset == dataset)
+    curr_df = curr_df[,c("ClusterK2_kmeans", "ClusterK3_kmeans", "ClusterK4_kmeans")]
+    curr_df$ClusterK2_kmeans = paste("k2", curr_df$ClusterK2_kmeans, sep="_")
+    curr_df$ClusterK3_kmeans = paste("k3", curr_df$ClusterK3_kmeans, sep="_")
+    curr_df$ClusterK4_kmeans = paste("k4", curr_df$ClusterK4_kmeans, sep="_")
+    
+    # make first pass
+    flow1_df = as.data.frame(table(curr_df[1:2]))
+    colnames(flow1_df) = c("source", "target", "value")
+    
+    # make second pass
+    flow2_df = as.data.frame(table(curr_df[2:3]))
+    colnames(flow2_df) = c("source", "target", "value")
+    
+    # combine
+    links_df = rbind(flow1_df, flow2_df)
+    links_df = flow2_df
+    
+    # make nodes
+    nodes_df <- data.frame(name=c(as.character(links_df$source), 
+                               as.character(links_df$target)) %>% unique())
+    
+    # make numeric ID
+    links_df$IDsource <- match(links_df$source, nodes_df$name)-1 
+    links_df$IDtarget <- match(links_df$target, nodes_df$name)-1
+    
+    return(list(links=links_df, nodes=nodes_df))
+    
+}
+
+plot_sankey <- function(links_df, nodes_df){
+    
+    p <- sankeyNetwork(Links = links_df, Nodes = nodes_df,
+              Source = "IDsource", Target = "IDtarget",
+              Value = "value", NodeID = "name", 
+              sinksRight=FALSE, iterations=0, fontSize = 24, width=750, height = 500)
+    
+    return(p)
+}
+
+
+```
+
+
+## Now for each dataset make the sankey plot
+
+```{r plot_tcga_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+tcga_network = get_sankey_df(sankey_df, dataset="TCGA")
+tcga_plot = plot_sankey(tcga_network[["links"]], tcga_network[["nodes"]])
+tcga_plot
+
+
+
+```
+
+```{r plot_mayo_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+mayo_network = get_sankey_df(sankey_df, dataset="mayo.eset")
+mayo_plot = plot_sankey(mayo_network[["links"]], mayo_network[["nodes"]])
+mayo_plot
+
+
+
+```
+
+```{r plot_tothill_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+tothill_network = get_sankey_df(sankey_df, dataset="Tothill")
+tothill_plot = plot_sankey(tothill_network[["links"]], tothill_network[["nodes"]])
+tothill_plot
+
+
+```
+
+```{r plot_yoshihara_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+yoshihara_network = get_sankey_df(sankey_df, dataset="Yoshihara")
+yoshihara_plot = plot_sankey(yoshihara_network[["links"]], yoshihara_network[["nodes"]])
+yoshihara_plot
+
+
+```
+
+
+```{r plot_aaces_sankey, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+aaces_network = get_sankey_df(sankey_df, dataset="aaces.eset")
+aaces_plot = plot_sankey(aaces_network[["links"]], aaces_network[["nodes"]])
+aaces_plot
+
+
+```

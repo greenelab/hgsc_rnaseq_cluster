@@ -1,0 +1,376 @@
+---
+title: "compare_clusters"
+author: "Natalie Davidson"
+date: "9/08/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("caret")
+library(ggpubr)
+theme_set(theme_pubr())
+
+proj_dir = here()
+
+set.seed(5)
+
+```
+
+# Intro
+
+In this notebook I compare the clusters from the two runs of the pipeline.
+The runs differ in the fact that they either have or don't have samples with neoadjuvant therapy.
+Since the clusters are mapped to TCGA clusters, we can use the cluster IDs to compare them.
+To do this, I treated the cluster IDs as expected (with neoadj) and predicted (withOUT neoadj) labels.
+This enables me to calculate balanced accuracy between the published results and my pipeline results.
+We do this across all datasets and in Kmeans and NMF.
+
+This notebook contains a lot of detailed results, but the important results are at the bottom in the section "Balanced Accuracy Summary".
+The summary contains the balanced accuracy across all datasets and sizes of K (2-4).
+Balanced accuracy is used when the cluster sizes differ -- which in this case they do slightly.
+
+It is calculated as (Sensitivity + Specificity) / 2
+
+Sensitivity (true positive rate) = TP / (TP + FN) 
+
+Specificity (true negative rate) = TN / (TN + FT) 
+
+# First read the files and process
+
+```{r read_in_files, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+new_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+new_df = data.frame(fread(new_file))
+colnames(new_df)[1] = "ID"
+
+old_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+old_df = data.frame(fread(old_file))
+colnames(old_df)[1] = "ID"
+
+# only take samples that are in both
+keep_ids = intersect(new_df$ID, old_df$ID)
+new_df = subset(new_df, ID %in% keep_ids)
+old_df = subset(old_df, ID %in% keep_ids)
+
+# order them so we can directly compare
+new_df = new_df[order(new_df$ID), ]
+old_df = old_df[order(old_df$ID), ]
+stopifnot(all(new_df$ID == old_df$ID))
+
+```
+
+
+# Plot confusion matrices
+
+```{r conf_matr_method, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+get_conf_matrix <- function(curr_dataset, curr_clust, new_df, old_df){
+    
+
+    expected_val = subset(old_df, Dataset == curr_dataset)
+    predicted_val = subset(new_df, Dataset == curr_dataset)
+    stopifnot(all(expected_val$ID == predicted_val$ID))
+    
+    expected_val = expected_val[,curr_clust]
+    predicted_val = predicted_val[,curr_clust]
+    
+    conf_res <- confusionMatrix(data=as.factor(predicted_val), 
+                                reference = as.factor(expected_val))
+    return(conf_res)
+
+}
+
+
+```
+
+### aaces.eset Kmeans
+
+```{r plot_aaces.eset, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+
+print("K=2")
+conf_res2 <- get_conf_matrix("aaces.eset", "ClusterK2_kmeans", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("aaces.eset", "ClusterK3_kmeans", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("aaces.eset", "ClusterK4_kmeans", new_df, old_df)
+print(conf_res4)
+
+BA_aaces_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_aaces_kmeans
+
+```
+
+### AACES NMF
+
+```{r plot_aaces_nmf, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("aaces.eset", "ClusterK2_NMF", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("aaces.eset", "ClusterK3_NMF", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("aaces.eset", "ClusterK4_NMF", new_df, old_df)
+print(conf_res4)
+
+BA_aaces_nmf = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_aaces_nmf
+
+```
+
+
+### TCGA Kmeans
+
+```{r plot_tcga, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+
+print("K=2")
+conf_res2 <- get_conf_matrix("TCGA", "ClusterK2_kmeans", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("TCGA", "ClusterK3_kmeans", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("TCGA", "ClusterK4_kmeans", new_df, old_df)
+print(conf_res4)
+
+BA_tcga_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_tcga_kmeans
+
+```
+
+### TCGA NMF
+
+```{r plot_tcga_nmf, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("TCGA", "ClusterK2_NMF", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("TCGA", "ClusterK3_NMF", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("TCGA", "ClusterK4_NMF", new_df, old_df)
+print(conf_res4)
+
+BA_tcga_nmf = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_tcga_nmf
+
+```
+
+
+### Mayo Kmeans
+
+```{r plot_mayo_kmeans, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("mayo.eset", "ClusterK2_kmeans", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("mayo.eset", "ClusterK3_kmeans", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("mayo.eset", "ClusterK4_kmeans", new_df, old_df)
+print(conf_res4)
+
+BA_mayo_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_mayo_kmeans
+
+```
+
+### Mayo NMF
+
+```{r plot_mayo_nmf, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("mayo.eset", "ClusterK2_NMF", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("mayo.eset", "ClusterK3_NMF", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("mayo.eset", "ClusterK4_NMF", new_df, old_df)
+print(conf_res4)
+
+BA_mayo_nmf = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_mayo_nmf
+
+
+```
+
+
+### Tothill Kmeans
+
+```{r plot_Tothill_kmeans, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("Tothill", "ClusterK2_kmeans", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("Tothill", "ClusterK3_kmeans", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("Tothill", "ClusterK4_kmeans", new_df, old_df)
+print(conf_res4)
+
+BA_tothill_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_tothill_kmeans
+
+```
+
+### Tothill NMF
+
+```{r plot_Tothill_nmf, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("Tothill", "ClusterK2_NMF", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("Tothill", "ClusterK3_NMF", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("Tothill", "ClusterK4_NMF", new_df, old_df)
+print(conf_res4)
+
+BA_tothill_nmf = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_tothill_nmf
+
+```
+
+
+### Yoshihara Kmeans
+
+```{r plot_Yoshihara_kmeans, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("Yoshihara", "ClusterK2_kmeans", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("Yoshihara", "ClusterK3_kmeans", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("Yoshihara", "ClusterK4_kmeans", new_df, old_df)
+print(conf_res4)
+
+
+BA_yoshihara_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_yoshihara_kmeans
+
+
+```
+
+### Yoshihara NMF
+
+```{r plot_Yoshihara_nmf, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+print("K=2")
+conf_res2 <- get_conf_matrix("Yoshihara", "ClusterK2_NMF", new_df, old_df)
+print(conf_res2)
+
+
+print("K=3")
+conf_res3 <- get_conf_matrix("Yoshihara", "ClusterK3_NMF", new_df, old_df)
+print(conf_res3)
+
+
+print("K=4")
+conf_res4 <- get_conf_matrix("Yoshihara", "ClusterK4_NMF", new_df, old_df)
+print(conf_res4)
+
+
+BA_yoshihara_nmf = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+BA_yoshihara_nmf
+
+
+```
+
+# Balanced Accuracy Summary
+
+```{r bs_summ, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+class_ids = c("K=2", "K=3, 1", "K=3, 2", "K=3, 3", "K=4, 1", "K=4, 2", "K=4, 3", "K=4, 4")
+
+
+# Balanced Accuracy for Kmeans
+ba_df = data.frame(class_ids,
+                    BA_aaces_kmeans,
+                    BA_tcga_kmeans,
+                    BA_mayo_kmeans,
+                    BA_tothill_kmeans,
+                    BA_yoshihara_kmeans)
+ba_df
+
+
+# Balanced Accuracy for NMF
+ba_df = data.frame(class_ids,
+                    BA_aaces_nmf,
+                    BA_tcga_nmf,
+                    BA_mayo_nmf,
+                    BA_tothill_nmf,
+                    BA_yoshihara_nmf)
+ba_df
+
+
+
+```
+
+# Conclusion
+
+We find that overall the clusters align between the previously published Way et. al. run and my run of the pipeline. 
+NOTE: There exist slight data and possibly code differences between our two runs, so we do not expect 100% matching between runs.
+However, we do expect high coherence between runs.
+We find that the clusters are more consistent in K-Means than NMF.
+We also find that K=4 is the most inconsistent between the two runs of the pipeline.
+We will consider K=4 and KMeans results for remaining main analyses.

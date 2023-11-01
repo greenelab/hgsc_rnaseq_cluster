@@ -1,0 +1,5 @@
+data/nanostring/nanostring_data_batch4.csv filter=lfs diff=lfs merge=lfs -text
+data/nanostring/nanostring_data_batch1.csv filter=lfs diff=lfs merge=lfs -text
+data/nanostring/nanostring_data_batch2.csv filter=lfs diff=lfs merge=lfs -text
+data/nanostring/nanostring_data_batch3.csv filter=lfs diff=lfs merge=lfs -text
+*.RData filter=lfs diff=lfs merge=lfs -text

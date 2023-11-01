@@ -1,0 +1,517 @@
+---
+title: "compare_centroids"
+author: "Natalie Davidson"
+date: "8/31/2023"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("caret")
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("VennDiagram")
+require("RColorBrewer")
+require("Rtsne")
+
+library("cluster")
+library("Thresher")
+
+
+library("curatedOvarianData")
+library("consensusOV")
+
+ggplot2::theme_set(theme_pubr())
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+
+set.seed(5)
+
+
+min_consensus_cutoff = 0
+
+# get the mapping if entrez
+gene_map_file = file.path(proj_dir, "/reference_data/ensembl_hgnc_entrez.tsv")
+if(file.exists(gene_map_file)){
+    gene_map = data.frame(fread(gene_map_file))
+}else{
+    gene_map = get_gene_id_map(c(), filter_type=NA, attributes=c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"), all_chr=F)
+}
+
+
+
+```
+
+# Running consensusOV
+
+This notebook compares our clustering results with the output of clusterOV.
+
+
+
+## Write all methods out
+
+```{r read_expr_method, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+# read microarray data
+read_format_MA_expr <- function(in_df, metadata_table){
+    
+     rnaseq_expr_df = in_df
+
+    # format it so we can add metadata
+    gene_ids = row.names(rnaseq_expr_df)
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = sample_ids
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+# read rnaseq
+read_format_expr <- function(in_file, metadata_table){
+    
+     rnaseq_expr_df = data.frame(fread(in_file))
+
+    # format it so we can add metadata
+    gene_ids = rnaseq_expr_df[,1]
+    rnaseq_expr_df = rnaseq_expr_df[,-1]
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = gsub("Sample_", "", row.names(rnaseq_expr_df))
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+# filter scale RNASeq
+filter_expr <- function(in_df, gene_df, metadata_table){
+        
+    # get samples that were used
+    # get genes of interest
+    gene_count_df = in_df
+    gene_count_df = in_df[,gene_df$hgnc_symbol]
+    gene_count_df = log10(gene_count_df+1)
+
+    
+    
+    # add metadata back
+    gene_count_df$ID = in_df$ID
+    gene_count_df = merge(gene_count_df, metadata_table)
+    
+    return(gene_count_df)
+}
+
+# learn+match cluster labels between consensusOV and Way
+get_cluster_labels <- function(gene_map, in_df, metadata_df, min_consensus_cutoff, do_log=FALSE){
+    
+    gene_map_curr = subset(gene_map, hgnc_symbol %in% gene_ids)
+    gene_map_curr = unique(gene_map_curr[,c("hgnc_symbol", "entrezgene_id")])
+    
+    in_df = merge(in_df, gene_map_curr, by="hgnc_symbol" )
+    
+    # make numeric
+    gene_ids_W = in_df$entrezgene_id
+    in_df = subset(in_df, select = -c(hgnc_symbol, entrezgene_id))
+    in_df = apply(as.matrix(in_df), 2, as.numeric)
+    
+    if(do_log){
+        in_df = log10(in_df+1)
+    }
+    
+    # do prediction
+    consensus_res <- get.subtypes(in_df, gene_ids_W, method = "consensus")
+    unstable_pred = names(which(apply(consensus_res$rf.probs, 1, max) < min_consensus_cutoff))
+    
+    # merge with old cluster labels
+    res_df = data.frame(ID=colnames(in_df),
+                             verhaak_clust=consensus_res$consensusOV.subtypes)
+    res_df = merge(res_df, metadata_df)
+    res_stable = subset(res_df, ! ID %in% unstable_pred)
+
+    return(res_stable)
+}
+
+
+mapping_tcga_way <- function(x){
+    if(x == "MES_consensus"){
+        return(1)
+    }else if(x == "PRO_consensus"){
+        return(2)
+    }else if(x == "IMR_consensus"){
+        return(3)
+    }else{
+        return(4)
+    }
+}
+
+
+```
+
+
+## First read in all metadata for Schildkraut
+
+```{r get_metadata, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+# Black metadata
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_AA_metadata_table.tsv")
+metadata_table = data.frame(fread(samp_meta_file))
+
+# format NAs for better plotting
+metadata_table$failed_seq[is.na(metadata_table$failed_seq)] = "passed"
+metadata_table$resequenced[is.na(metadata_table$resequenced)] = "passed"
+metadata_table$low_qual[is.na(metadata_table$low_qual)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[is.na(metadata_table$REMOVE_LOW_EXPRESSION)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[metadata_table$REMOVE_LOW_EXPRESSION==TRUE] = "failed"
+
+metadata_table_AA = metadata_table
+
+# white metadata
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_white_metadata_table.tsv")
+metadata_table = data.frame(fread(samp_meta_file))
+
+# format NAs for better plotting
+metadata_table$failed_seq[is.na(metadata_table$failed_seq)] = "passed"
+metadata_table$resequenced[is.na(metadata_table$resequenced)] = "passed"
+metadata_table$low_qual[is.na(metadata_table$low_qual)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[is.na(metadata_table$REMOVE_LOW_EXPRESSION)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[metadata_table$REMOVE_LOW_EXPRESSION==TRUE] = "failed"
+
+metadata_table_W = metadata_table
+
+
+# genes of interest
+
+common_genes_file = file.path(proj_dir, 
+                                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/CommonGenes_genelist.csv")
+common_genes = data.frame(fread(common_genes_file))
+colnames(common_genes) = "hgnc_symbol"
+
+
+MAD_genes_file = file.path(proj_dir, 
+                                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+MAD_genes = data.frame(fread(MAD_genes_file))
+colnames(MAD_genes) = "hgnc_symbol"
+
+# cluster ID labels
+
+new_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+clust_df = data.frame(fread(new_file))
+colnames(clust_df)[1] = "ID"
+
+
+```
+
+## Read in expression for Schildkraut
+
+```{r read_expr, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+# make formatted
+in_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline.tsv")
+res = read_format_expr(in_file, metadata_table_AA)
+full_expr_B = res[[1]]
+
+MAD_expr_B = filter_expr(full_expr_B, MAD_genes, metadata_table_AA)
+MAD_expr_B = filter(MAD_expr_B, ran_in_way_pipeline == TRUE)
+MAD_expr_B = subset(MAD_expr_B, select = -c(REMOVE_WHITE))
+metadata_table_AA = subset(metadata_table_AA, select = -c(REMOVE_WHITE, REMOVE_NEOADJ))
+
+
+# make formatted
+in_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_normalized_filtered_for_way_pipeline_whites.tsv")
+res = read_format_expr(in_file, metadata_table_W)
+full_expr_W = res[[1]]
+MAD_expr_W = filter_expr(full_expr_W, MAD_genes, metadata_table_W)
+MAD_expr_W = filter(MAD_expr_W, ran_in_way_pipeline == TRUE)
+MAD_expr_W = subset(MAD_expr_W, select = -c(REMOVE_BLACK))
+metadata_table_W = subset(metadata_table_W, select = -c(REMOVE_BLACK))
+
+outlier_ids_W = MAD_expr_W$ID
+
+```
+
+
+
+
+
+
+# run clustOV
+
+## run SchildkrautW
+
+```{r clustOV_schW, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+# format table
+curr_IDs = MAD_expr_W$ID
+gene_ids = colnames(MAD_expr_W)[2:ncol(MAD_expr_W)]
+MAD_expr_W_matr = as.data.frame(t(MAD_expr_W[, 2:ncol(MAD_expr_W)]))
+colnames(MAD_expr_W_matr) = curr_IDs
+
+MAD_expr_W_matr$hgnc_symbol = gene_ids
+
+# run clustering
+schW_res = get_cluster_labels(gene_map, MAD_expr_W_matr, metadata_table_W, min_consensus_cutoff, do_log = TRUE)
+
+
+schW_res$mapped = unlist(lapply(schW_res$verhaak_clust, mapping_tcga_way))
+schW_consensus_way = schW_res$ID[which(schW_res$mapped == schW_res$ClusterK4_kmeans)]
+
+table(schW_res$mapped, schW_res$ClusterK4_kmeans)
+
+# get the comparison 
+conf_res <- caret::confusionMatrix(data=as.factor(schW_res$mapped), 
+                                reference = as.factor(schW_res$ClusterK4_kmeans))
+conf_res
+
+schW_ba = conf_res$byClass[,11]
+
+```
+
+
+
+## run SchildkrautB
+
+```{r clustOV_schB, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+# format table
+curr_IDs = MAD_expr_B$ID
+gene_ids = colnames(MAD_expr_B)[2:ncol(MAD_expr_B)]
+MAD_expr_B_matr = as.data.frame(t(MAD_expr_B[, 2:ncol(MAD_expr_B)]))
+colnames(MAD_expr_B_matr) = curr_IDs
+
+MAD_expr_B_matr$hgnc_symbol = gene_ids
+
+schB_res = get_cluster_labels(gene_map, MAD_expr_B_matr, metadata_table_AA, min_consensus_cutoff, do_log = TRUE)
+
+table(schB_res$verhaak_clust, schB_res$ClusterK4_kmeans)
+
+
+schB_res$mapped = unlist(lapply(schB_res$verhaak_clust, mapping_tcga_way))
+schB_consensus_way = schB_res$ID[which(schB_res$mapped == schB_res$ClusterK4_kmeans)]
+
+
+# get the comparison 
+conf_res <- caret::confusionMatrix(data=as.factor(schB_res$mapped), 
+                                reference = as.factor(schB_res$ClusterK4_kmeans))
+conf_res
+
+schB_ba = conf_res$byClass[,11]
+
+```
+
+
+
+
+## run TCGA
+
+```{r clustOV_tcga, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+tcga_data = data(TCGA_eset)
+ExpressionData <- get(tcga_data)
+tcga_dta <- exprs(ExpressionData)
+
+tcga_metadata_table = subset(clust_df, Dataset == "TCGA")
+
+# format the expr table
+res = read_format_MA_expr(tcga_dta, tcga_metadata_table)
+tcga_df = res[[1]]
+
+# format table
+curr_IDs = tcga_df$ID
+gene_ids = colnames(tcga_df)[9:ncol(tcga_df)]
+tcga_matr = as.data.frame(t(tcga_df[, 9:ncol(tcga_df)]))
+colnames(tcga_matr) = curr_IDs
+
+tcga_matr$hgnc_symbol = gene_ids
+
+# get consensus clusters
+tcga_res = get_cluster_labels(gene_map, tcga_matr, tcga_metadata_table, min_consensus_cutoff)
+
+table(tcga_res$verhaak_clust, tcga_res$ClusterK4_kmeans)
+
+
+tcga_res$mapped = unlist(lapply(tcga_res$verhaak_clust, mapping_tcga_way))
+tcga_consensus_way = tcga_res$ID[which(tcga_res$mapped == tcga_res$ClusterK4_kmeans)]
+
+# get the comparison 
+conf_res <- caret::confusionMatrix(data=as.factor(tcga_res$mapped), 
+                                reference = as.factor(tcga_res$ClusterK4_kmeans))
+conf_res
+
+tcga_ba = conf_res$byClass[,11]
+
+```
+
+
+## run mayo
+
+```{r clustOV_mayo, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+mayo_data = load(file=file.path(proj_dir, 
+                                "/data/mayo/MayoEset.Rda"))
+
+ExpressionData <- get(mayo_data)
+mayo_dta <- exprs(ExpressionData)
+
+# read in the metadata
+mayo_metadata_table = subset(clust_df, Dataset == "mayo.eset")
+
+# format the expr table
+res = read_format_MA_expr(mayo_dta, mayo_metadata_table)
+mayo_df = res[[1]]
+
+
+# format table
+curr_IDs = mayo_df$ID
+gene_ids = colnames(mayo_df)[9:ncol(mayo_df)]
+mayo_matr = as.data.frame(t(mayo_df[, 9:ncol(mayo_df)]))
+colnames(mayo_matr) = curr_IDs
+
+mayo_matr$hgnc_symbol = gene_ids
+
+
+# get consensus clusters
+mayo_res = get_cluster_labels(gene_map, mayo_matr, mayo_metadata_table, min_consensus_cutoff)
+
+table(mayo_res$verhaak_clust, mayo_res$ClusterK4_kmeans)
+
+
+mayo_res$mapped = unlist(lapply(mayo_res$verhaak_clust, mapping_tcga_way))
+mayo_consensus_way = mayo_res$ID[which(mayo_res$mapped == mayo_res$ClusterK4_kmeans)]
+
+# get the comparison 
+conf_res <- caret::confusionMatrix(data=as.factor(mayo_res$mapped), 
+                                reference = as.factor(mayo_res$ClusterK4_kmeans))
+conf_res
+
+mayo_ba = conf_res$byClass[,11]
+
+```
+
+
+## run tothill
+
+```{r clustOV_tothill, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+tothill_data = data(GSE9891_eset)
+ExpressionData <- get(tothill_data)
+tothill_dta <- exprs(ExpressionData)
+
+tothill_metadata_table = subset(clust_df, Dataset == "Tothill")
+
+# format the expr table
+res = read_format_MA_expr(tothill_dta, tothill_metadata_table)
+tothill_df = res[[1]]
+
+
+# format table
+curr_IDs = tothill_df$ID
+gene_ids = colnames(tothill_df)[9:ncol(tothill_df)]
+tothill_matr = as.data.frame(t(tothill_df[, 9:ncol(tothill_df)]))
+colnames(tothill_matr) = curr_IDs
+
+tothill_matr$hgnc_symbol = gene_ids
+
+# get consensus clusters
+tothill_res = get_cluster_labels(gene_map, tothill_matr, tothill_metadata_table, min_consensus_cutoff)
+
+
+table(tothill_res$verhaak_clust, tothill_res$ClusterK4_kmeans)
+
+
+
+tothill_res$mapped = unlist(lapply(tothill_res$verhaak_clust, mapping_tcga_way))
+tothill_consensus_way = tothill_res$ID[which(tothill_res$mapped == tothill_res$ClusterK4_kmeans)]
+
+# get the comparison 
+conf_res <- caret::confusionMatrix(data=as.factor(tothill_res$mapped), 
+                                reference = as.factor(tothill_res$ClusterK4_kmeans))
+conf_res
+
+tothill_ba = conf_res$byClass[,11]
+
+```
+
+
+## run yoshihara
+
+```{r clustOV_yoshihara, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+yoshihara_data = data(GSE32062.GPL6480_eset)
+ExpressionData <- get(yoshihara_data)
+yoshihara_dta <- exprs(ExpressionData)
+
+yoshihara_metadata_table = subset(clust_df, Dataset == "Yoshihara")
+
+# format the expr table
+res = read_format_MA_expr(yoshihara_dta, yoshihara_metadata_table)
+yoshihara_df = res[[1]]
+
+
+# format table
+curr_IDs = yoshihara_df$ID
+gene_ids = colnames(yoshihara_df)[9:ncol(yoshihara_df)]
+yoshihara_matr = as.data.frame(t(yoshihara_df[, 9:ncol(yoshihara_df)]))
+colnames(yoshihara_matr) = curr_IDs
+
+yoshihara_matr$hgnc_symbol = gene_ids
+
+
+# get consensus clusters
+yoshihara_res = get_cluster_labels(gene_map, yoshihara_matr, yoshihara_metadata_table, min_consensus_cutoff)
+
+
+table(yoshihara_res$verhaak_clust, yoshihara_res$ClusterK4_kmeans)
+
+
+
+yoshihara_res$mapped = unlist(lapply(yoshihara_res$verhaak_clust, mapping_tcga_way))
+yoshihara_consensus_way = yoshihara_res$ID[which(yoshihara_res$mapped == yoshihara_res$ClusterK4_kmeans)]
+
+all_consensus = c(schB_consensus_way, schW_consensus_way, tcga_consensus_way,
+                  mayo_consensus_way, tothill_consensus_way, yoshihara_consensus_way)
+
+# get the comparison 
+conf_res <- caret::confusionMatrix(data=as.factor(yoshihara_res$mapped), 
+                                reference = as.factor(yoshihara_res$ClusterK4_kmeans))
+conf_res
+
+yoshihara_ba = conf_res$byClass[,11]
+
+```
+
+## format table
+
+```{r format_ba, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+all_dfs = list("SchildkrautB"=schB_ba, "SchildkrautW"=schW_ba, "TCGA"=tcga_ba, "Mayo"=mayo_ba, "Tothill"=tothill_ba, "Yoshihara"=yoshihara_ba)
+all_dfs = bind_rows(all_dfs, .id = "Dataset")
+
+colnames(all_dfs) = c("Dataset", "Mesenchymal", "Proliferative", "Immunoreactive", "Differentiated")
+
+library(knitr)
+kable(all_dfs, 1, align = "c", digits=3, caption="Balanced Accuracy between consensusOV and our subtype classifications")
+
+```

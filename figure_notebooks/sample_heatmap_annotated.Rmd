@@ -1,0 +1,214 @@
+---
+title: "sample_heatmap_annotated"
+author: "Natalie Davidson"
+date: "9/12/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("SummarizedExperiment")
+require("ggrepel")
+require("RColorBrewer")
+require("readr")
+require("pheatmap")
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+set.seed(5)
+
+
+```
+
+## Sample Heatmap 
+
+This notebook is for generating a heatmap comparing how correlated each samples is to another using log10(normalized counts)
+These counts are the same values used in the Way pipeline.
+The samples are then annotated by their cluster ID.
+Cluster IDs from AACES are mapped to predefined TCGA clusters.
+
+Cluster IDs are from: `/data/way_pipeline_results_10removed_NeoRemoved/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv`
+
+Cluster ID to TCGA subtype are from: `/data/way_pipeline_results_10removed_NeoRemoved/2.Clustering_DiffExprs-Tables-Data_Concordance/TCGA_KmeansClusterK*.csv
+
+For the AACES samples, both of those tables are summarized and in the following metadata file:
+Sample Metadata: `/reference_data/main_metadata_table.tsv`
+
+Sample Expression: `/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline_bottom10Removed.tsv.gz`
+Genes Used in clustering: `/data/way_pipeline_results_10removed_NeoRemoved/1.DataInclusion-Data-Genes/CommonGenes_genelist.csv`
+
+### read all data
+
+```{r read_data, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+# read in the expression
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline_bottom10Removed.tsv.gz")
+rnaseq_expr_df = data.frame(fread(rnaseq_expr_file))
+
+
+# filter for genes used in the analysis
+colnames(rnaseq_expr_df)[1] = "hgnc_symbol"
+gene_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved/1.DataInclusion-Data-Genes/CommonGenes_genelist.csv")
+gene_df <- data.frame(fread(gene_file))
+
+colnames(gene_df)[1] = "hgnc_symbol"
+
+rnaseq_expr_df = subset(rnaseq_expr_df, hgnc_symbol %in% gene_df$hgnc_symbol)
+gene_ids = rnaseq_expr_df$hgnc_symbol
+
+# format into a style for correlations
+rnaseq_expr_df = rnaseq_expr_df[,-1]
+sample_ids = colnames(rnaseq_expr_df)
+rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+
+# now add column names back so we can have annotations
+colnames(rnaseq_expr_df) = gene_ids
+rnaseq_expr_df$ID = gsub("Sample_", "", row.names(rnaseq_expr_df))
+
+# read in the metadata
+metadata_file = file.path(proj_dir, 
+                    "/reference_data/main_metadata_table.tsv")
+metadata_df = data.frame(fread(metadata_file))
+full_df = merge(metadata_df, rnaseq_expr_df, by = "ID")
+
+
+```
+
+
+### make method to calculate correlations
+
+```{r calc_corr_method, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+library(amap)
+
+calc_corr <- function(full_df, k_idx, kmeans_colname, gene_ids, proj_dir){
+    
+    curr_df = full_df
+    colname_idx = which(colnames(curr_df) == kmeans_colname)
+    colnames(curr_df)[colname_idx] = "KMeans_Result"
+    curr_df = curr_df[order(curr_df$KMeans_Result),]
+
+    
+    expr_df = subset(curr_df, KMeans_Result == 1)
+    dist_mat1 <- Dist(log10(expr_df[,gene_ids]+1), method = 'pearson')
+    hclust_1 <- hclust(dist_mat1, method = 'complete')$order
+    
+    expr_df = subset(curr_df, KMeans_Result == 2)
+    dist_mat2 <- Dist(log10(expr_df[,gene_ids]+1), method = 'pearson')
+    hclust_2 <- hclust(dist_mat2, method = 'complete')$order
+
+    temp_df = rbind(subset(curr_df, KMeans_Result == 1)[hclust_1,],
+                subset(curr_df, KMeans_Result == 2)[hclust_2,])
+
+    if(k_idx > 2){
+        expr_df = subset(curr_df, KMeans_Result == 3)
+        dist_mat3 <- Dist(log10(expr_df[,gene_ids]+1), method = 'pearson')
+        hclust_3 <- hclust(dist_mat3, method = 'complete')$order
+        temp_df = rbind(temp_df,
+                        subset(curr_df, KMeans_Result == 3)[hclust_3,])
+    }
+     if(k_idx > 3){
+        expr_df = subset(curr_df, KMeans_Result == 4)
+        dist_mat4 <- Dist(log10(expr_df[,gene_ids]+1), method = 'pearson')
+        hclust_4 <- hclust(dist_mat4, method = 'complete')$order
+        temp_df = rbind(temp_df,
+                        subset(curr_df, KMeans_Result == 4)[hclust_4,])
+    }
+    curr_df = temp_df
+    
+    annotation_row_df <- data.frame(subset(curr_df, select=c(KMeans_Result)))
+    annotation_row_df$KMeans_Result = paste0("Clust", annotation_row_df$KMeans_Result)
+    annotation_row_df$KMeans_Result = as.factor(annotation_row_df$KMeans_Result)
+    row.names(annotation_row_df) = curr_df$ID
+    
+    # set up colors
+    cluster_colors = brewer.pal(n = 8, name = "Set2")
+    if(k_idx == 2){
+        ann_colors = list(
+        KMeans_Result = c("Clust1"=cluster_colors[1],"Clust2"=cluster_colors[2]))
+    }else if(k_idx == 3){
+        ann_colors = list(
+        KMeans_Result = c("Clust1"=cluster_colors[1], 
+                            "Clust2"=cluster_colors[2],
+                            "Clust3"=cluster_colors[3]))
+    }else if(k_idx == 4){
+        ann_colors = list(
+        KMeans_Result = c("Clust1"=cluster_colors[1], 
+                            "Clust2"=cluster_colors[2],
+                            "Clust3"=cluster_colors[3],
+                            "Clust4"=cluster_colors[4]))
+    }else{
+        print("k_idx invalid")
+        return(NA)
+    }
+    
+    # make the correlation matrix
+    expr_df = curr_df[,gene_ids]
+    expr_df = (t(log10(expr_df+1)))
+    cor_df <- cor(expr_df, method="pearson", use="complete.obs")
+    row.names(cor_df) = curr_df$ID
+    colnames(cor_df) = curr_df$ID
+    
+    # now plot
+    gg = pheatmap(cor_df, annotation_row = annotation_row_df, 
+             annotation_col = annotation_row_df,
+             annotation_colors = ann_colors,
+             scale = "none", show_rownames = F,
+             annotation_names_row = F,
+             show_colnames = F, cluster_cols = F, cluster_rows = F,
+             main = paste("K =", k_idx))
+    
+    outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/", k_idx, "_full_heatmap.pdf")
+    ggsave(outfile,
+           gg, width = 7, height = 5, units = "in", device = "pdf")
+    
+    return(gg)
+}
+
+```
+
+### calculate correlations for K = 2, 3, 4
+
+```{r calc_corr, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+
+kmeans_2 = calc_corr(full_df, k_idx=2, kmeans_colname="ClusterK2_kmeans", gene_ids, proj_dir)
+kmeans_3 = calc_corr(full_df, k_idx=3, kmeans_colname="ClusterK3_kmeans", gene_ids, proj_dir)
+kmeans_4 = calc_corr(full_df, k_idx=4, kmeans_colname="ClusterK4_kmeans", gene_ids, proj_dir)
+
+
+```
+
+
+### format figure 
+
+```{r make_fig1, echo=TRUE, warning=FALSE, message=F}
+
+
+k2_gg = image_read_pdf(file.path(proj_dir,
+                                  "/figure_notebooks/manuscript_figs/2_full_heatmap.pdf"))
+k3_gg = image_read_pdf(file.path(proj_dir,
+                                  "/figure_notebooks/manuscript_figs/3_full_heatmap.pdf"))
+k4_gg = image_read_pdf(file.path(proj_dir,
+                                  "/figure_notebooks/manuscript_figs/4_full_heatmap.pdf"))
+k2_gg = image_annotate(k2_gg, "a", size = 160)
+k3_gg = image_annotate(k3_gg, "b", size = 160)
+k4_gg = image_annotate(k4_gg, "c", size = 160)
+
+full_panel <- image_append(image_scale(c(k2_gg, k3_gg, k4_gg), 3000), stack = FALSE)
+
+print(full_image)
+outfile = file.path(proj_dir,"/figure_notebooks/manuscript_figs/full_heatmap.pdf")
+image_write(full_image, format = "pdf", outfile)
+outfile = file.path(proj_dir,"/figure_notebooks/manuscript_figs/full_heatmap.png")
+image_write(full_image, format = "png", outfile)
+
+```

@@ -1,0 +1,314 @@
+---
+title: "make_lognorm_AACES_data"
+author: "Natalie Davidson"
+date: "6/14/2021"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("SummarizedExperiment")
+require("ggrepel")
+require("RColorBrewer")
+require("readr")
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+set.seed(5)
+
+
+
+```
+
+# read in the sample exclusions
+
+```{r get_samps_exclusions, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+# read in the samples that should be excluded
+# we will remove all samples that are from white women
+samp_exclusion_file = file.path(proj_dir, 
+                    "/reference_data/way_exclusions.csv")
+samp_exclusion_df = data.frame(fread(samp_exclusion_file))
+samp_exclusion_df = subset(samp_exclusion_df, exclude_white==TRUE)
+
+# get the neoadjuvant samples
+neoadj_file = file.path(proj_dir, 
+                    "/reference_data/tissuegrant_epidata_08102022.csv")
+neoadj_df = data.frame(fread(neoadj_file))
+neoadj_df = subset(neoadj_df, neoadj=="yes")
+
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/AACES_FFPE_RNA_JeffMarks_Doherty.tsv")
+rnaseq_trans_df = data.frame(fread(rnaseq_trans_file))
+neoadj_df = merge(neoadj_df[,c("suid", "neoadj")], rnaseq_trans_df[,c("suid", "ID")])
+assertthat::are_equal(nrow(neoadj_df), 53)
+
+```
+
+# read in the expression table -- raw counts all chromosomes even contigs
+
+```{r get_norm_samps, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+
+# read in the expression data
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_gene_quant_full_annotated.RDS")
+gene_expr_df = readr::read_rds(gene_expr_file)
+total_dt = assay(gene_expr_df)
+
+
+# JUST IN CASE remove the samples that are from white women
+# these should already be removed
+sample_ids_remove = paste0("Sample_", samp_exclusion_df$ID)
+sample_ids_keep = setdiff(colnames(total_dt), sample_ids_remove)
+
+# JUST IN CASE remove the samples that had neoadjuvant therapy
+# these should already be removed
+sample_ids_remove = paste0("Sample_", neoadj_df$ID)
+sample_ids_keep = setdiff(colnames(total_dt), sample_ids_remove)
+stopifnot(length(sample_ids_keep) == 272)
+
+total_dt = total_dt[,sample_ids_keep]
+
+
+# translate gene ids -- ALL CHROMOSOMES
+gene_map_df = data.frame(ensembl_gene_id = unique(rowData(gene_expr_df)$gene_id))
+gene_map_df = get_gene_id_map(gene_map_df,
+                                filter_type="ensembl_gene_id",
+                                attributes= c("hgnc_symbol", "ensembl_gene_id"),
+                                all_chr=T)
+gene_map_df = gene_map_df[,c("hgnc_symbol", "ensembl_gene_id")]
+
+
+# we have to get the correct gene symbols
+gene_map_df = na.omit(gene_map_df)
+gene_map_df = subset(gene_map_df, hgnc_symbol != "")
+
+# special to our definition of ENSMBL gene
+# we will make ENSG00000276085 map to CCL3L1 (as in GRCh38.p13)
+# in a previous annotation it is ambiguous, if it is CCL3L1 or CCL3L3
+gene_map_df = subset(gene_map_df, hgnc_symbol != "CCL3L3")
+
+# also in the other direction as of GRCh38.p13
+# POLR2J3 maps to ENSG00000168255, not ENSG00000285437
+# PINX1 maps to ENSG00000254093, not ENSG00000258724
+# TBCE maps to ENSG00000284770, not ENSG00000285053
+# SIGLEC5 maps to ENSG00000268501, not ENSG00000268500
+gene_map_df = subset(gene_map_df, !ensembl_gene_id %in% 
+                                    c("ENSG00000285437", "ENSG00000258724", 
+                                      "ENSG00000285053", "ENSG00000268500"))
+
+assertthat::are_equal(nrow(gene_map_df), length(unique(gene_map_df$ensembl_gene_id)))
+
+total_dt_names = data.frame(ensembl_gene_id = rownames(total_dt), total_dt)
+total_dt_names = merge(gene_map_df, total_dt_names, by="ensembl_gene_id")
+
+total_dt = total_dt_names[,3:ncol(total_dt_names)]
+row.names(total_dt) = total_dt_names$ensembl_gene_id
+total_dt_names = total_dt_names[,order(colnames(total_dt_names))]
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_raw_counts_for_way_pipeline_allCHR.tsv")
+write.table(total_dt_names, gene_expr_file, sep="\t")
+
+
+
+# filter lowly expressed genes (median across samples must be more than 0)
+filtered_genes = rownames(total_dt)[which(apply(total_dt, 1, median)==0)]
+gene_count_filt = subset(total_dt,
+                        ! rownames(total_dt) %in% filtered_genes)
+
+# get the 85th quantile and library size normalize
+samp_85th = apply(gene_count_filt, 2, quantile, 0.85)
+samp_85th = samp_85th/max(samp_85th)
+gene_count_filt_norm = sweep(gene_count_filt, 2, samp_85th, FUN = '/')
+
+# write the gene ids
+gene_count_filt_norm$ensembl_gene_id = row.names(gene_count_filt_norm)
+gene_df = total_dt_names[,1:2]
+gene_count_filt_norm = merge(gene_count_filt_norm, gene_df)
+
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline_allCHR.tsv")
+write.table(gene_count_filt_norm, gene_expr_file, sep="\t")
+
+gene_count_filt_norm_allCHR = gene_count_filt_norm
+
+
+```
+
+# read in the expression table -- raw counts no contigs
+
+
+```{r get_gene_names_removeCHR, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+# read in the expression data
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_gene_quant_full_annotated.RDS")
+gene_expr_df = readr::read_rds(gene_expr_file)
+total_dt = assay(gene_expr_df)
+
+
+# JUST IN CASE remove the samples that are from white women
+# these should already be removed
+sample_ids_remove = paste0("Sample_", samp_exclusion_df$ID)
+sample_ids_keep = setdiff(colnames(total_dt), sample_ids_remove)
+
+# JUST IN CASE remove the samples that had neoadjuvant therapy
+# these should already be removed
+sample_ids_remove = paste0("Sample_", neoadj_df$ID)
+sample_ids_keep = setdiff(colnames(total_dt), sample_ids_remove)
+stopifnot(length(sample_ids_keep) == 272)
+
+total_dt = total_dt[,sample_ids_keep]
+
+
+# translate gene ids -- NOT ALL CHROMOSOMES
+gene_map_df = data.frame(ensembl_gene_id = unique(rowData(gene_expr_df)$gene_id))
+gene_map_df = get_gene_id_map(gene_map_df,
+                                filter_type="ensembl_gene_id",
+                                attributes= c("hgnc_symbol", "ensembl_gene_id"),
+                                all_chr=FALSE)
+gene_map_df = gene_map_df[,c("hgnc_symbol", "ensembl_gene_id")]
+
+
+# we have to get the correct gene symbols
+gene_map_df = na.omit(gene_map_df)
+gene_map_df = subset(gene_map_df, hgnc_symbol != "")
+
+# special to our definition of ENSMBL gene
+# we will make ENSG00000276085 map to CCL3L1 (as in GRCh38.p13)
+# in a previous annotation it is ambiguous, if it is CCL3L1 or CCL3L3
+gene_map_df = subset(gene_map_df, hgnc_symbol != "CCL3L3")
+
+# also in the other direction as of GRCh38.p13
+# POLR2J3 maps to ENSG00000168255, not ENSG00000285437
+# PINX1 maps to ENSG00000254093, not ENSG00000258724
+# TBCE maps to ENSG00000284770, not ENSG00000285053
+# SIGLEC5 maps to ENSG00000268501, not ENSG00000268500
+# PRODH maps to ENSG00000100033, not ENSG00000277196
+gene_map_df = subset(gene_map_df, !ensembl_gene_id %in% 
+                                    c("ENSG00000285437", "ENSG00000258724", 
+                                      "ENSG00000285053", "ENSG00000268500",
+                                      "ENSG00000277196"))
+
+assertthat::are_equal(nrow(gene_map_df), length(unique(gene_map_df$ensembl_gene_id)))
+assertthat::are_equal(nrow(gene_map_df), length(unique(gene_map_df$hgnc_symbol)))
+
+total_dt_names = data.frame(ensembl_gene_id = rownames(total_dt), total_dt)
+total_dt_names = merge(gene_map_df, total_dt_names, by="ensembl_gene_id")
+
+total_dt = total_dt_names[,3:ncol(total_dt_names)]
+row.names(total_dt) = total_dt_names$hgnc_symbol
+
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_raw_counts_for_way_pipeline.tsv")
+write.table(total_dt, gene_expr_file, sep="\t")
+
+```
+
+
+## Now normalize the samples
+
+```{r norm_samples, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+
+# filter lowly expressed genes (median across samples must be more than 0)
+filtered_genes = rownames(total_dt)[which(apply(total_dt, 1, median)==0)]
+gene_count_filt = subset(total_dt,
+                        ! rownames(total_dt) %in% filtered_genes)
+
+print("Removed the following genes from consideration:")
+print(length(filtered_genes))
+
+# get the 85th quantile and library size normalize
+samp_85th = apply(gene_count_filt, 2, quantile, 0.85)
+samp_85th = samp_85th/max(samp_85th)
+gene_count_filt_norm = sweep(gene_count_filt, 2, samp_85th, FUN = '/')
+
+
+
+#### plot the normalized expr
+
+gene_count_filt_norm_melt = data.frame(gene_count_filt_norm)
+gene_count_filt_norm_melt$gene_id = row.names(gene_count_filt_norm_melt)
+gene_count_filt_norm_melt <- melt(gene_count_filt_norm_melt, id.vars="gene_id")
+colnames(gene_count_filt_norm_melt) = c("gene_id", "sample_id", "norm_count")
+
+# order samples by median expression
+sample_order_df = data.frame(median_count = apply(gene_count_filt_norm, 2, median),
+                             sample_id = colnames(gene_count_filt_norm), 
+                             quantile25 = apply(gene_count_filt_norm, 2, quantile, 0.25))
+sample_order_df = sample_order_df[order(sample_order_df$median_count),]
+
+
+# save the samples to remove 
+SAMPLES_FILTERED_OUT = rownames(subset(sample_order_df, quantile25 < 30 | median_count < 925))
+gene_count_filt_norm_melt$sample_id = factor(gene_count_filt_norm_melt$sample_id, 
+                                    levels = sample_order_df$sample_id)
+print(sample_order_df[1:11,])
+
+```
+
+## Plot Normalized Samples
+
+```{r plot_samples, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+#### plot the normalized expr over all samples
+
+
+
+ggplot(gene_count_filt_norm_melt, aes(x=as.factor(sample_id), y=log10(norm_count+1))) +
+    geom_boxplot() + theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    xlab("Sample IDs") + ylab("log10(norm_count+1)") +
+        ggtitle("filtered + normalized count distribution over gene for each sample")
+
+
+#### plot the PCA
+
+plot_pca(gene_count_filt_norm, title = "Filtered+Normalized PCA")
+
+
+
+
+```
+
+## Write out table for Way pipeline
+
+```{r write_table, fig.align='center', fig.width=15, fig.height=15, echo=FALSE, warning=FALSE, message=F}
+
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline.tsv")
+
+write.table(gene_count_filt_norm, gene_expr_file, sep="\t")
+
+samples_keep = setdiff(colnames(gene_count_filt_norm), SAMPLES_FILTERED_OUT)
+filt_samps = gene_count_filt_norm[,samples_keep]
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline_bottom10Removed.tsv")
+
+write.table(filt_samps, gene_expr_file, sep="\t")
+
+removed_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/way_pipeline_samples_removed.tsv")
+
+write.table(SAMPLES_FILTERED_OUT, removed_file, sep="\t")
+
+
+# also write out the the full CHR table
+samples_keep = setdiff(colnames(gene_count_filt_norm_allCHR), SAMPLES_FILTERED_OUT)
+filt_samps = gene_count_filt_norm_allCHR[,samples_keep]
+filt_samps = filt_samps[,order(colnames(filt_samps))]
+gene_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline_bottom10Removed_allCHR.tsv")
+write.table(filt_samps, gene_expr_file, sep="\t")
+
+
+
+```

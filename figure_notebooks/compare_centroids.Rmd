@@ -1,0 +1,713 @@
+---
+title: "compare_centroids"
+author: "Natalie Davidson"
+date: "8/31/2023"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("caret")
+
+require("data.table")
+require("here")
+require("ggplot2")
+require("dplyr")
+require("ggpubr")
+require("VennDiagram")
+require("RColorBrewer")
+require("Rtsne")
+
+library("curatedOvarianData")
+library("consensusOV")
+
+ggplot2::theme_set(theme_pubr())
+
+proj_dir = here()
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+
+set.seed(5)
+
+
+all_PCs = paste(rep("PC", 50), 1:50, sep="")
+
+
+```
+
+# Comparing centoirs for uncertainty
+
+This notebook generates figure 1, where we look at the relative positions of 
+centroids across all datasets. We first normalize within dataset to make the 
+expression of each dataset comparable. Furthermore, we log10 the RNA-Seq values
+in order to deal with outlying gene expression. 
+
+In each plot, we only use the MAD genes, which are the genes used by the clustering pipeline.
+We do the following steps:
+1) read in expression and normalize
+2) filter to MAD genes
+3) Concatenate expression matrices and apply PCA
+4) Take top 15 PCs, calculate centroid for each dataset and each cluster within the dataset.
+5) Center the datasets such that the centroid of the dataset is at 0,0
+6) Plot the cluster centroids after centering of dataset centroids.
+
+
+
+## First read in all metadata
+
+```{r get_metadata, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+# Black metadata
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_AA_metadata_table.tsv")
+metadata_table = data.frame(fread(samp_meta_file))
+
+# format NAs for better plotting
+metadata_table$failed_seq[is.na(metadata_table$failed_seq)] = "passed"
+metadata_table$resequenced[is.na(metadata_table$resequenced)] = "passed"
+metadata_table$low_qual[is.na(metadata_table$low_qual)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[is.na(metadata_table$REMOVE_LOW_EXPRESSION)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[metadata_table$REMOVE_LOW_EXPRESSION==TRUE] = "failed"
+
+metadata_table_AA = metadata_table
+
+# white metadata
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_white_metadata_table.tsv")
+metadata_table = data.frame(fread(samp_meta_file))
+
+# format NAs for better plotting
+metadata_table$failed_seq[is.na(metadata_table$failed_seq)] = "passed"
+metadata_table$resequenced[is.na(metadata_table$resequenced)] = "passed"
+metadata_table$low_qual[is.na(metadata_table$low_qual)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[is.na(metadata_table$REMOVE_LOW_EXPRESSION)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[metadata_table$REMOVE_LOW_EXPRESSION==TRUE] = "failed"
+
+metadata_table_W = metadata_table
+
+
+# genes of interest
+
+common_genes_file = file.path(proj_dir, 
+                                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/CommonGenes_genelist.csv")
+common_genes = data.frame(fread(common_genes_file))
+colnames(common_genes) = "hgnc_symbol"
+
+
+MAD_genes_file = file.path(proj_dir, 
+                                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+MAD_genes = data.frame(fread(MAD_genes_file))
+colnames(MAD_genes) = "hgnc_symbol"
+
+# cluster ID labels
+
+new_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+clust_df = data.frame(fread(new_file))
+colnames(clust_df)[1] = "ID"
+
+
+```
+
+## Read in expression
+
+```{r read_expr_method, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+read_format_MA_expr <- function(in_df, metadata_table){
+    
+     rnaseq_expr_df = in_df
+
+    # format it so we can add metadata
+    gene_ids = row.names(rnaseq_expr_df)
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = sample_ids
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+
+read_format_expr <- function(in_file, metadata_table){
+    
+     rnaseq_expr_df = data.frame(fread(in_file))
+
+    # format it so we can add metadata
+    gene_ids = rnaseq_expr_df[,1]
+    rnaseq_expr_df = rnaseq_expr_df[,-1]
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = gsub("Sample_", "", row.names(rnaseq_expr_df))
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+
+filter_expr <- function(in_df, gene_df, metadata_table){
+        
+    # get samples that were used
+    # get genes of interest
+    gene_count_df = in_df[,gene_df$hgnc_symbol]
+    gene_count_df = log10(gene_count_df+1)
+
+    
+    
+    # add metadata back
+    gene_count_df$ID = in_df$ID
+    gene_count_df = merge(gene_count_df, metadata_table, by="ID")
+    
+    return(gene_count_df)
+}
+
+
+
+```
+
+
+## Read Schlidkraut
+
+```{r read_expr, fig.align='center', fig.width=15, fig.height=15, echo=TRUE, warning=FALSE, message=F}
+
+
+# make formatted
+in_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline.tsv")
+res = read_format_expr(in_file, metadata_table_AA)
+full_expr_B = res[[1]]
+
+MAD_expr_B = filter_expr(full_expr_B, MAD_genes, metadata_table_AA)
+MAD_expr_B = filter(MAD_expr_B, ran_in_way_pipeline == TRUE)
+MAD_expr_B = subset(MAD_expr_B, select = -c(REMOVE_WHITE))
+metadata_table_AA = subset(metadata_table_AA, select = -c(REMOVE_WHITE, REMOVE_NEOADJ))
+
+
+# make formatted
+in_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_normalized_filtered_for_way_pipeline_whites.tsv")
+res = read_format_expr(in_file, metadata_table_W)
+full_expr_W = res[[1]]
+MAD_expr_W = filter_expr(full_expr_W, MAD_genes, metadata_table_W)
+MAD_expr_W = filter(MAD_expr_W, ran_in_way_pipeline == TRUE)
+MAD_expr_W = subset(MAD_expr_W, select = -c(REMOVE_BLACK))
+metadata_table_W = subset(metadata_table_W, select = -c(REMOVE_BLACK))
+
+# make scaled matr
+schB_scaled = as.data.frame(t(scale(t(MAD_expr_B[,MAD_genes$hgnc_symbol]))))
+schB_scaled$ID = MAD_expr_B$ID
+schB_scaled_df = merge(metadata_table_AA, schB_scaled, by="ID")
+schB_scaled_df$Dataset = "SchildkrautB"
+
+schW_scaled = as.data.frame(t(scale(t(MAD_expr_W[,MAD_genes$hgnc_symbol]))))
+schW_scaled$ID = MAD_expr_W$ID
+schW_scaled_df = merge(metadata_table_W, schW_scaled, by="ID")
+schW_scaled_df$Dataset = "SchildkrautW"
+
+
+
+
+```
+
+
+
+## Read TCGA
+
+```{r read_tcga, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+tcga_data = data(TCGA_eset)
+ExpressionData <- get(tcga_data)
+tcga_dta <- exprs(ExpressionData)
+
+tcga_metadata_table = subset(clust_df, Dataset == "TCGA")
+
+# format the expr table
+res = read_format_MA_expr(tcga_dta, tcga_metadata_table)
+tcga_df = res[[1]]
+
+# make scaled matr
+tcga_scaled = t(scale(t(tcga_df[,MAD_genes$hgnc_symbol])))
+tcga_scaled_df = cbind(tcga_df[,c("ID", "Dataset", "ClusterK2_kmeans", 
+                                  "ClusterK3_kmeans", "ClusterK4_kmeans")], 
+                       tcga_scaled)
+
+```
+
+
+
+
+
+## Analyze Mayo
+
+```{r read_mayo, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+mayo_data = load(file=file.path(proj_dir, 
+                                "/data/mayo/MayoEset.Rda"))
+
+ExpressionData <- get(mayo_data)
+mayo_dta <- exprs(ExpressionData)
+
+# read in the metadata
+mayo_metadata_table = subset(clust_df, Dataset == "mayo.eset")
+
+# format the expr table
+res = read_format_MA_expr(mayo_dta, mayo_metadata_table)
+mayo_df = res[[1]]
+
+
+# keep scaled data
+mayo_scaled = t(scale(t(mayo_df[,MAD_genes$hgnc_symbol])))
+mayo_scaled_df = cbind(mayo_df[,c("ID", "Dataset", "ClusterK2_kmeans", 
+                                  "ClusterK3_kmeans", "ClusterK4_kmeans")], 
+                       mayo_scaled)
+
+
+
+
+```
+
+
+
+## Analyze Tothill
+
+```{r read_tothill, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+tothill_data = data(GSE9891_eset)
+ExpressionData <- get(tothill_data)
+tothill_dta <- exprs(ExpressionData)
+
+tothill_metadata_table = subset(clust_df, Dataset == "Tothill")
+
+# format the expr table
+res = read_format_MA_expr(tothill_dta, tothill_metadata_table)
+tothill_df = res[[1]]
+
+# keep scaled data
+tothill_scaled = t(scale(t(tothill_df[,MAD_genes$hgnc_symbol])))
+tothill_scaled_df = cbind(tothill_df[,c("ID", "Dataset", "ClusterK2_kmeans", 
+                                  "ClusterK3_kmeans", "ClusterK4_kmeans")], 
+                       tothill_scaled)
+
+
+```
+
+
+
+
+
+## Analyze Yoshihara
+
+```{r read_yoshihara, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+
+yoshihara_data = data(GSE32062.GPL6480_eset)
+ExpressionData <- get(yoshihara_data)
+yoshihara_dta <- exprs(ExpressionData)
+
+yoshihara_metadata_table = subset(clust_df, Dataset == "Yoshihara")
+
+# format the expr table
+res = read_format_MA_expr(yoshihara_dta, yoshihara_metadata_table)
+yoshihara_df = res[[1]]
+
+
+# keep scaled data
+yoshihara_scaled = t(scale(t(yoshihara_df[,MAD_genes$hgnc_symbol])))
+yoshihara_scaled_df = cbind(yoshihara_df[,c("ID", "Dataset", "ClusterK2_kmeans", 
+                                  "ClusterK3_kmeans", "ClusterK4_kmeans")], 
+                       yoshihara_scaled)
+
+
+```
+
+
+# plot new joint projection
+
+```{r plot_joint, fig.align='center', fig.width=10, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+common_cols = intersect(colnames(schB_scaled_df), colnames(tcga_scaled_df))
+
+scaled_pca_df = rbind(schB_scaled_df[,common_cols], schW_scaled_df[,common_cols], 
+                      tcga_scaled_df[,common_cols], mayo_scaled_df[,common_cols],
+                      tothill_scaled_df[,common_cols], yoshihara_scaled_df[,common_cols])
+
+# make joint PCA
+pr_joint = prcomp(scaled_pca_df[,MAD_genes$hgnc_symbol], scale = FALSE)
+res_pca_joint = data.frame(pr_joint$x)
+res_pca_joint$ID = scaled_pca_df$ID
+
+percentage <- round(pr_joint$sdev^2 / sum(pr_joint$sdev^2) * 100, 2)
+percentage <- paste( colnames(pr_joint), "(", paste( as.character(percentage), "%", ")", sep="") )
+
+
+color_id = "ClusterK3_kmeans"
+title = "Projected_Samples"
+
+pca_joint_df = merge(scaled_pca_df[,c("ID", "Dataset", "ClusterK2_kmeans", "ClusterK3_kmeans", "ClusterK4_kmeans")], res_pca_joint, by="ID")
+pca_joint_df[,color_id] = as.factor(pca_joint_df[,color_id])
+pca_joint_df = pca_joint_df[,c("ID", "Dataset", "ClusterK2_kmeans", "ClusterK3_kmeans", "ClusterK4_kmeans", all_PCs)]
+
+
+centroids_df <- aggregate(cbind(PC1,PC2,PC3)~ClusterK3_kmeans+Dataset,pca_joint_df,mean)
+
+gg21 = ggplot(pca_joint_df, aes_string(x="PC2",y="PC1", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=centroids_df,size=5) +
+    ggtitle(title) +
+    xlab("PC2 Before Centroid Centering") + ylab("PC1 Before Centroid Centering")
+
+gg31 = ggplot(pca_joint_df, aes_string(x="PC3",y="PC1", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=centroids_df,size=5) +
+    ggtitle(title) +
+    xlab("PC3 Before Centroid Centering") + ylab("PC1 Before Centroid Centering")
+
+gg32 = ggplot(pca_joint_df, aes_string(x="PC3",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=centroids_df,size=5) +
+    ggtitle(title) +
+    xlab("PC3 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+ggarrange(gg21, gg31, gg32, ncol = 3, nrow=1, common.legend = TRUE, legend="bottom")
+
+
+
+gg_pca_schB = ggplot(subset(pca_joint_df, Dataset == "SchildkrautB"), aes_string(x="PC1",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=subset(centroids_df, Dataset == "SchildkrautB"),size=5) +
+    ggtitle("SchildkrautB") +
+    xlab("PC1 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+
+gg_pca_schB
+
+
+gg_pca_schW = ggplot(subset(pca_joint_df, Dataset == "SchildkrautW"), aes_string(x="PC1",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=subset(centroids_df, Dataset == "SchildkrautW"),size=5) +
+    ggtitle("SchildkrautW") +
+    xlab("PC1 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+
+gg_pca_schW
+
+
+gg_pca_tcga = ggplot(subset(pca_joint_df, Dataset == "TCGA"), aes_string(x="PC1",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=subset(centroids_df, Dataset == "TCGA"),size=5) +
+    ggtitle("TCGA") +
+    xlab("PC1 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+
+gg_pca_tcga
+
+
+gg_pca_mayo = ggplot(subset(pca_joint_df, Dataset == "mayo.eset"), aes_string(x="PC1",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=subset(centroids_df, Dataset == "mayo.eset"),size=5) +
+    ggtitle("Mayo") +
+    xlab("PC1 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+
+gg_pca_mayo
+
+
+gg_pca_tothill = ggplot(subset(pca_joint_df, Dataset == "Tothill"), aes_string(x="PC1",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=subset(centroids_df, Dataset == "Tothill"),size=5) +
+    ggtitle("Tothill") +
+    xlab("PC1 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+
+gg_pca_tothill
+
+
+gg_pca_yoshihara = ggplot(subset(pca_joint_df, Dataset == "Yoshihara"), aes_string(x="PC1",y="PC2", color=color_id, shape="Dataset")) +
+    geom_point(alpha=0)  +
+    theme_bw() + xlab(percentage[1]) + ylab(percentage[2]) +
+    geom_point(data=subset(centroids_df, Dataset == "Yoshihara"),size=5) +
+    ggtitle("Yoshihara") +
+    xlab("PC1 Before Centroid Centering") + ylab("PC2 Before Centroid Centering")
+
+gg_pca_yoshihara
+
+
+```
+
+
+# distance all
+
+```{r dist_all, fig.align='center', fig.width=15, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+# calc centroids
+centroids_df <- aggregate(cbind(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15)~ClusterK3_kmeans+Dataset,pca_joint_df,mean)
+centroids_all_df <- aggregate(cbind(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15)~Dataset,pca_joint_df,mean)
+centroids_all_df = cbind(data.frame(clusterID=NA),centroids_all_df)
+
+# write them out
+centroids_df
+centroids_all_df
+
+PCs = paste0("PC", 1:3)
+
+# center dataset-specific cluster centroids
+k1 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK3_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+k2 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK3_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+k3 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK3_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+mayo_pc = rbind(k1, k2, k3)
+
+k1 = filter(centroids_df, Dataset=="Tothill" & ClusterK3_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+k2 = filter(centroids_df, Dataset=="Tothill" & ClusterK3_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+k3 = filter(centroids_df, Dataset=="Tothill" & ClusterK3_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+tothill_pc = rbind(k1, k2, k3)
+
+
+
+k1 = filter(centroids_df, Dataset=="TCGA" & ClusterK3_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+k2 = filter(centroids_df, Dataset=="TCGA" & ClusterK3_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+k3 = filter(centroids_df, Dataset=="TCGA" & ClusterK3_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+tcga_pc = rbind(k1, k2, k3)
+
+
+
+k1 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK3_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+k2 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK3_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+k3 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK3_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+yoshihara_pc = rbind(k1, k2, k3)
+
+
+
+k1 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK3_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+k2 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK3_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+k3 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK3_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+schB_pc = rbind(k1, k2, k3)
+
+
+
+k1 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK3_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+k2 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK3_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+k3 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK3_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+schW_pc = rbind(k1, k2, k3)
+
+centered_pc_df = rbind(mayo_pc, tothill_pc, tcga_pc, yoshihara_pc, schB_pc, schW_pc)
+centered_pc_df$Dataset = c(rep("Mayo", 3), rep("Tothill", 3), rep("TCGA", 3),
+                           rep("Yoshihara", 3), rep("SchildkrautB", 3), rep("SchildkrautW", 3))
+centered_pc_df$Cluster = as.factor(rep(c(1, 2, 3), 6))
+
+# plot
+gg12 = ggplot(centered_pc_df, aes(x=PC2, y=PC1, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw()+ theme(legend.position = "none") +
+        xlab("PC2 After Centroid Centering") + ylab("PC1 After Centroid Centering")
+
+
+gg13 = ggplot(centered_pc_df, aes(x=PC3, y=PC1, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw() +
+        xlab("PC3 After Centroid Centering") + ylab("PC1 After Centroid Centering")
+
+
+gg23 = ggplot(centered_pc_df, aes(x=PC2, y=PC3, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw()+ theme(legend.position = "none") +
+        xlab("PC2 After Centroid Centering") + ylab("PC3 After Centroid Centering")
+
+
+gg = ggarrange(gg12, gg13, gg23, ncol = 3, nrow=1, common.legend = TRUE, legend="bottom")
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/centroids_k3.pdf")
+ggsave(outfile,
+       gg, width = 12, height = 4, units = "in", device = "pdf")
+
+gg
+
+
+```
+
+
+```{r dist_all_K2, fig.align='center', fig.width=15, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+# calculater K2 centroid
+centroids_df <- aggregate(cbind(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15)~ClusterK2_kmeans+Dataset,pca_joint_df,mean)
+centroids_all_df <- aggregate(cbind(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15)~Dataset,pca_joint_df,mean)
+centroids_all_df = cbind(data.frame(clusterID=NA),centroids_all_df)
+
+centroids_df
+centroids_all_df
+
+PCs = paste0("PC", 1:3)
+
+# center dataset-specific cluster centroids
+k1 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK2_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+k2 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK2_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+mayo_pc = rbind(k1, k2)
+
+k1 = filter(centroids_df, Dataset=="Tothill" & ClusterK2_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+k2 = filter(centroids_df, Dataset=="Tothill" & ClusterK2_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+tothill_pc = rbind(k1, k2)
+
+
+
+k1 = filter(centroids_df, Dataset=="TCGA" & ClusterK2_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+k2 = filter(centroids_df, Dataset=="TCGA" & ClusterK2_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+tcga_pc = rbind(k1, k2)
+
+
+
+k1 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK2_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+k2 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK2_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+yoshihara_pc = rbind(k1, k2)
+
+
+
+k1 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK2_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+k2 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK2_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+schB_pc = rbind(k1, k2)
+
+
+
+k1 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK2_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+k2 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK2_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+schW_pc = rbind(k1, k2)
+
+centered_pc_df = rbind(mayo_pc, tothill_pc, tcga_pc, yoshihara_pc, schB_pc, schW_pc)
+centered_pc_df$Dataset = c(rep("Mayo", 2), rep("Tothill", 2), rep("TCGA", 2),
+                           rep("Yoshihara", 2), rep("SchildkrautB", 2), rep("SchildkrautW", 2))
+centered_pc_df$Cluster = as.factor(rep(c(1, 2), 6))
+
+# plot
+gg12 = ggplot(centered_pc_df, aes(x=PC2, y=PC1, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw()+ theme(legend.position = "none") +
+        xlab("PC2 After Centroid Centering") + ylab("PC1 After Centroid Centering")
+
+
+gg13 = ggplot(centered_pc_df, aes(x=PC3, y=PC1, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw() +
+        xlab("PC3 After Centroid Centering") + ylab("PC1 After Centroid Centering")
+
+
+gg23 = ggplot(centered_pc_df, aes(x=PC2, y=PC3, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw()+ theme(legend.position = "none") +
+        xlab("PC2 After Centroid Centering") + ylab("PC3 After Centroid Centering")
+
+
+gg = ggarrange(gg12, gg13, gg23, ncol = 3, nrow=1, common.legend = TRUE, legend="bottom")
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/centroids_k2.pdf")
+ggsave(outfile,
+       gg, width = 12, height = 4, units = "in", device = "pdf")
+
+gg
+
+```
+
+
+```{r dist_all_K4, fig.align='center', fig.width=15, fig.height=5, echo=TRUE, warning=FALSE, message=F}
+
+# calculate K4 clusters
+centroids_df <- aggregate(cbind(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15)~ClusterK4_kmeans+Dataset,pca_joint_df,mean)
+centroids_all_df <- aggregate(cbind(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15)~Dataset,pca_joint_df,mean)
+centroids_all_df = cbind(data.frame(clusterID=NA),centroids_all_df)
+
+# write it out
+centroids_df
+centroids_all_df
+
+PCs = paste0("PC", 1:3)
+
+# center dataset-specific cluster centroids
+k1 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK4_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+k2 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK4_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+k3 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK4_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+k4 = filter(centroids_df, Dataset=="mayo.eset" & ClusterK4_kmeans == 4)[,PCs] - filter(centroids_all_df, Dataset=="mayo.eset" )[,PCs]
+mayo_pc = rbind(k1, k2, k3, k4)
+
+k1 = filter(centroids_df, Dataset=="Tothill" & ClusterK4_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+k2 = filter(centroids_df, Dataset=="Tothill" & ClusterK4_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+k3 = filter(centroids_df, Dataset=="Tothill" & ClusterK4_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+k4 = filter(centroids_df, Dataset=="Tothill" & ClusterK4_kmeans == 4)[,PCs] - filter(centroids_all_df, Dataset=="Tothill" )[,PCs]
+tothill_pc = rbind(k1, k2, k3, k4)
+
+
+
+k1 = filter(centroids_df, Dataset=="TCGA" & ClusterK4_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+k2 = filter(centroids_df, Dataset=="TCGA" & ClusterK4_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+k3 = filter(centroids_df, Dataset=="TCGA" & ClusterK4_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+k4 = filter(centroids_df, Dataset=="TCGA" & ClusterK4_kmeans == 4)[,PCs] - filter(centroids_all_df, Dataset=="TCGA" )[,PCs]
+tcga_pc = rbind(k1, k2, k3, k4)
+
+
+
+k1 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK4_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+k2 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK4_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+k3 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK4_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+k4 = filter(centroids_df, Dataset=="Yoshihara" & ClusterK4_kmeans == 4)[,PCs] - filter(centroids_all_df, Dataset=="Yoshihara" )[,PCs]
+yoshihara_pc = rbind(k1, k2, k3, k4)
+
+
+
+k1 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK4_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+k2 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK4_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+k3 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK4_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+k4 = filter(centroids_df, Dataset=="SchildkrautB" & ClusterK4_kmeans == 4)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautB" )[,PCs]
+schB_pc = rbind(k1, k2, k3, k4)
+
+
+
+k1 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK4_kmeans == 1)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+k2 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK4_kmeans == 2)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+k3 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK4_kmeans == 3)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+k4 = filter(centroids_df, Dataset=="SchildkrautW" & ClusterK4_kmeans == 4)[,PCs] - filter(centroids_all_df, Dataset=="SchildkrautW" )[,PCs]
+schW_pc = rbind(k1, k2, k3, k4)
+
+centered_pc_df = rbind(mayo_pc, tothill_pc, tcga_pc, yoshihara_pc, schB_pc, schW_pc)
+centered_pc_df$Dataset = c(rep("Mayo", 4), rep("Tothill", 4), rep("TCGA", 4),
+                           rep("Yoshihara", 4), rep("SchildkrautB", 4), rep("SchildkrautW", 4))
+centered_pc_df$Dataset <- factor(centered_pc_df$Dataset, 
+                                 levels=c("SchildkrautB", "SchildkrautW", "TCGA", "Mayo", "Tothill", "Yoshihara"))
+
+centered_pc_df$Cluster = as.factor(rep(c(1, 2, 3, 4), 6))
+
+# plot
+gg12 = ggplot(centered_pc_df, aes(x=PC2, y=PC1, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw()+ theme(legend.position = "none") +
+        xlab("PC2 After Centroid Centering") + ylab("PC1 After Centroid Centering")
+
+
+gg13 = ggplot(centered_pc_df, aes(x=PC3, y=PC1, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw() +
+        xlab("PC3 After Centroid Centering") + ylab("PC1 After Centroid Centering")
+
+
+gg23 = ggplot(centered_pc_df, aes(x=PC2, y=PC3, color = Cluster, shape=Dataset)) +
+        geom_point() +
+        theme_bw()+ theme(legend.position = "none") +
+        xlab("PC2 After Centroid Centering") + ylab("PC3 After Centroid Centering")
+
+gg = ggarrange(gg12, gg13, gg23, ncol = 3, nrow=1, common.legend = TRUE, legend="bottom")
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/centroids_k4.pdf")
+ggsave(outfile,
+       gg, width = 12, height = 4, units = "in", device = "pdf")
+
+gg
+
+
+```

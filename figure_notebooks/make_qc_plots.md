@@ -1,0 +1,1025 @@
+make_supp_tables
+================
+Natalie Davidson
+9/21/2022
+
+# QC
+
+This notebook generates supplemental for the AACES data and generated QC
+tables, boxplots to show library depth, and T-SNE plots of samples.
+
+# Make Supplemental Tables
+
+## First make a venn diagram of Sequencing metadata
+
+``` r
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_AA_metadata_table.tsv")
+metadata_table = data.frame(fread(samp_meta_file))
+
+# format NAs for better plotting
+metadata_table$ClusterK2_kmeans[is.na(metadata_table$ClusterK2_kmeans)] = "too_low_expr"
+metadata_table$ClusterK3_kmeans[is.na(metadata_table$ClusterK3_kmeans)] = "too_low_expr"
+metadata_table$ClusterK4_kmeans[is.na(metadata_table$ClusterK4_kmeans)] = "too_low_expr"
+metadata_table$ClusterK2_NMF[is.na(metadata_table$ClusterK2_NMF)] = "too_low_expr"
+metadata_table$ClusterK3_NMF[is.na(metadata_table$ClusterK3_NMF)] = "too_low_expr"
+metadata_table$ClusterK4_NMF[is.na(metadata_table$ClusterK4_NMF)] = "too_low_expr"
+
+resequenced = metadata_table$ID[!is.na(metadata_table$resequenced)]
+low_qual = metadata_table$ID[!is.na(metadata_table$low_qual)]
+low_expr = metadata_table$ID[which(metadata_table$REMOVE_LOW_EXPRESSION)]
+
+venn_object <- venn.diagram(list(low_expr, resequenced, low_qual),
+                            category.names = c("Low Expression" , "Re-Seq", "Low Quality"),
+                            fill = brewer.pal(n = 3, name = "Set3"), 
+                            filename = NULL)
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/venn_samples_AA_qc.pdf")
+ggsave(outfile,
+       venn_object, width = 7, height = 7, units = "in", device="pdf")
+
+# format NAs for better plotting
+metadata_table$failed_seq[is.na(metadata_table$failed_seq)] = "passed"
+metadata_table$resequenced[is.na(metadata_table$resequenced)] = "passed"
+metadata_table$low_qual[is.na(metadata_table$low_qual)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[is.na(metadata_table$REMOVE_LOW_EXPRESSION)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[metadata_table$REMOVE_LOW_EXPRESSION==TRUE] = "failed"
+
+metadata_table_AA = metadata_table
+
+
+gene_meta_file = file.path(proj_dir, 
+                    "/reference_data/temp_gene_lengths.tsv")
+gene_len_df = data.frame(fread(gene_meta_file))
+gene_len_df = gene_len_df[order(gene_len_df$Median, decreasing = T),]
+gene_len_df = gene_len_df[!duplicated(gene_len_df$HGNC.symbol),]
+```
+
+``` r
+samp_meta_file = file.path(proj_dir, 
+                    "/reference_data/main_white_metadata_table.tsv")
+metadata_table = data.frame(fread(samp_meta_file))
+
+# format NAs for better plotting
+metadata_table$ClusterK2_kmeans[is.na(metadata_table$ClusterK2_kmeans)] = "too_low_expr"
+metadata_table$ClusterK3_kmeans[is.na(metadata_table$ClusterK3_kmeans)] = "too_low_expr"
+metadata_table$ClusterK4_kmeans[is.na(metadata_table$ClusterK4_kmeans)] = "too_low_expr"
+metadata_table$ClusterK2_NMF[is.na(metadata_table$ClusterK2_NMF)] = "too_low_expr"
+metadata_table$ClusterK3_NMF[is.na(metadata_table$ClusterK3_NMF)] = "too_low_expr"
+metadata_table$ClusterK4_NMF[is.na(metadata_table$ClusterK4_NMF)] = "too_low_expr"
+
+resequenced = metadata_table$ID[!is.na(metadata_table$resequenced)]
+low_qual = metadata_table$ID[!is.na(metadata_table$low_qual)]
+low_expr = metadata_table$ID[which(metadata_table$REMOVE_LOW_EXPRESSION)]
+
+venn_object <- venn.diagram(list(low_expr, resequenced, low_qual),
+                            category.names = c("Low Expression" , "Re-Seq", "Low Quality"),
+                            fill = brewer.pal(n = 3, name = "Set3"), 
+                            filename = NULL)
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/venn_samples_W_qc.pdf")
+ggsave(outfile,
+       venn_object, width = 7, height = 7, units = "in", device="pdf")
+
+# format NAs for better plotting
+metadata_table$failed_seq[is.na(metadata_table$failed_seq)] = "passed"
+metadata_table$resequenced[is.na(metadata_table$resequenced)] = "passed"
+metadata_table$low_qual[is.na(metadata_table$low_qual)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[is.na(metadata_table$REMOVE_LOW_EXPRESSION)] = "passed"
+metadata_table$REMOVE_LOW_EXPRESSION[metadata_table$REMOVE_LOW_EXPRESSION==TRUE] = "failed"
+
+metadata_table_W = metadata_table
+```
+
+## Now make a venn diagram of common genes and MAD genes
+
+``` r
+orig_common_genes_file = file.path(proj_dir, 
+                                    "/data/way_publication_results/CommonGenes_genelist.csv")
+orig_common_genes = data.frame(fread(orig_common_genes_file))
+
+common_genes_file = file.path(proj_dir, 
+                                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/CommonGenes_genelist.csv")
+common_genes = data.frame(fread(common_genes_file))
+
+
+orig_MAD_genes_file = file.path(proj_dir, 
+                                    "/data/way_publication_results/GlobalMAD_genelist.csv")
+orig_MAD_genes = data.frame(fread(orig_MAD_genes_file))
+
+MAD_genes_file = file.path(proj_dir, 
+                                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+MAD_genes = data.frame(fread(MAD_genes_file))
+
+
+venn_list = list(orig_common=orig_common_genes$x, current_common=common_genes$x,
+                 orig_MAD=orig_MAD_genes$x, current_MAD=MAD_genes$x)
+venn_object <- venn.diagram(venn_list,
+                            category.names = c("Original\nPublication\nCommon Genes" , "Our\nCommon Genes",
+                                               "Original\nPublication\nMAD Genes" , "Our\nMAD Genes"),
+                            fill = brewer.pal(n = 10, name = "Set3")[1:4], 
+                            filename = NULL)
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/venn_common_genes.pdf")
+ggsave(outfile,
+       venn_object, width = 7, height = 7, units = "in", device="pdf")
+```
+
+## Make Balanced Acc tabls
+
+``` r
+get_conf_matrix <- function(curr_dataset, curr_clust, new_df, old_df){
+    
+
+    expected_val = subset(old_df, Dataset == curr_dataset)
+    predicted_val = subset(new_df, Dataset == curr_dataset)
+    stopifnot(all(expected_val$ID == predicted_val$ID))
+    
+    expected_val = expected_val[,curr_clust]
+    predicted_val = predicted_val[,curr_clust]
+    
+    conf_res <- caret::confusionMatrix(data=as.factor(predicted_val), 
+                                reference = as.factor(expected_val))
+    return(conf_res)
+
+}
+
+
+new_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/2.Clustering_DiffExprs-Tables-ClusterMembership/FullClusterMembership.csv")
+
+new_df = data.frame(fread(new_file))
+colnames(new_df)[1] = "ID"
+new_df$ClusterK2_kmeans = new_df$ClusterK2_kmeans-1 # clusters flipped
+new_df$ClusterK2_kmeans[new_df$ClusterK2_kmeans <= 0] = 2
+
+
+old_file = file.path(proj_dir, 
+                    "/data/way_publication_results/033514_tables3.csv")
+
+old_df = data.frame(fread(old_file))
+old_df$Dataset[which(old_df$Dataset == "Mayo")] = "mayo.eset"
+
+# only take samples that are in both
+keep_ids = intersect(new_df$ID, old_df$ID)
+new_df = subset(new_df, ID %in% keep_ids)
+old_df = subset(old_df, ID %in% keep_ids)
+
+# order them so we can directly compare
+new_df = new_df[order(new_df$ID), ]
+old_df = old_df[order(old_df$ID), ]
+stopifnot(all(new_df$ID == old_df$ID))
+
+# TCGA
+conf_res2 <- get_conf_matrix("TCGA", "ClusterK2_kmeans", new_df, old_df)
+conf_res3 <- get_conf_matrix("TCGA", "ClusterK3_kmeans", new_df, old_df)
+conf_res4 <- get_conf_matrix("TCGA", "ClusterK4_kmeans", new_df, old_df)
+BA_tcga_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+
+
+# Mayo
+conf_res2 <- get_conf_matrix("mayo.eset", "ClusterK2_kmeans", new_df, old_df)
+conf_res3 <- get_conf_matrix("mayo.eset", "ClusterK3_kmeans", new_df, old_df)
+conf_res4 <- get_conf_matrix("mayo.eset", "ClusterK4_kmeans", new_df, old_df)
+BA_mayo_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+
+
+# Tothill
+conf_res2 <- get_conf_matrix("Tothill", "ClusterK2_kmeans", new_df, old_df)
+conf_res3 <- get_conf_matrix("Tothill", "ClusterK3_kmeans", new_df, old_df)
+conf_res4 <- get_conf_matrix("Tothill", "ClusterK4_kmeans", new_df, old_df)
+BA_tothill_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+
+
+# yoshihara
+conf_res2 <- get_conf_matrix("Yoshihara", "ClusterK2_kmeans", new_df, old_df)
+conf_res3 <- get_conf_matrix("Yoshihara", "ClusterK3_kmeans", new_df, old_df)
+conf_res4 <- get_conf_matrix("Yoshihara", "ClusterK4_kmeans", new_df, old_df)
+BA_yoshihara_kmeans = c(conf_res2$byClass[11], conf_res3$byClass[,11], conf_res4$byClass[,11])
+
+
+
+class_ids = c("K=2", "K=3, 1", "K=3, 2", "K=3, 3", "K=4, 1", "K=4, 2", "K=4, 3", "K=4, 4")
+
+
+# Balanced Accuracy for Kmeans
+ba_df = data.frame(class_ids,
+                    BA_tcga_kmeans,
+                    BA_mayo_kmeans,
+                    BA_tothill_kmeans,
+                    BA_yoshihara_kmeans)
+ba_df
+```
+
+    ##   class_ids BA_tcga_kmeans BA_mayo_kmeans BA_tothill_kmeans BA_yoshihara_kmeans
+    ## 1       K=2     0.02993722     0.02793462        0.05097591           0.0146423
+    ## 2    K=3, 1     0.98579465     0.97539447        0.93182773           0.9823104
+    ## 3    K=3, 2     0.97482014     0.90853234        0.99743590           0.9180849
+    ## 4    K=3, 3     0.98059238     0.93500309        0.93804268           0.9652778
+    ## 5    K=4, 1     0.96516573     0.97519855        0.99404762           0.9940476
+    ## 6    K=4, 2     0.98364899     0.96797213        0.99494949           1.0000000
+    ## 7    K=4, 3     0.97369674     0.97858928        0.96899125           0.9702105
+    ## 8    K=4, 4     0.94097980     0.98589487        0.95416431           0.9869519
+
+``` r
+    # plot the correlation matrix as a heatmap
+gg_out = ggplot(data = melt(ba_df)) + geom_tile(aes(x=variable,y=class_ids, fill = value)) +
+                    geom_text(aes(x=variable,y=class_ids, label=round(value, 2))) + 
+                    scale_fill_gradient2(low="blue", mid="white", high="red", 
+                                        midpoint=0.75,    
+                                        breaks=seq(0,1,0.1), 
+                                        limits=c(0.5, 1)) + 
+                    theme_bw() + labs(y = "Cluster ID for each K", x="Dataset") +
+                    theme(legend.position = "none")
+gg_out
+```
+
+<img src="make_qc_plots_files/figure-gfm/balanced_acc-1.png" style="display: block; margin: auto;" />
+
+``` r
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/BA_kmeans.pdf")
+ggsave(outfile,
+       gg_out, width = 7, height = 5, units = "in", device="pdf")
+```
+
+## Make MultiQC for AA samples
+
+``` r
+# read in and format the multiQC file
+multiqc_file = file.path(proj_dir, 
+                    "/reference_data/multiqc_summary_table_AA.csv")
+
+multiqc_df = data.frame(fread(multiqc_file))
+colnames(multiqc_df) = c("ID", "dup_rate", "percent_q30", "mb_Q30", "gc_content", 
+                         "percent_reads_passFilter", "percent_reads_wAdapter")
+
+samp_ids = unlist(lapply(multiqc_df$ID, function(x) strsplit(x, "_")[[1]][1]))
+multiqc_df$ID = samp_ids
+
+# now format it for plotting
+multiqc_df_melt = melt(multiqc_df, id="ID")
+
+# for now we only care about the percent_q30 and percent_reads_passFilter
+multiqc_df_melt = subset(multiqc_df_melt, multiqc_df_melt$variable %in% 
+                                            c("percent_q30", "percent_reads_passFilter"))
+
+
+# translate percent to numeric
+multiqc_df_melt$value = as.numeric(sub("%","",multiqc_df_melt$value))/100
+multiqc_df_melt = multiqc_df_melt
+multiqc_df_melt = multiqc_df_melt[order(multiqc_df_melt$value),]
+multiqc_df_melt$variable = droplevels(multiqc_df_melt$variable)
+
+# plot the correlation matrix as a heatmap
+qc_metric = c("Percent of Reads\nPassing FastP Filter",
+              "Percent of Bases\nWith >=Q30")
+names(qc_metric) = c("percent_reads_passFilter", "percent_q30")
+gg_out = ggplot(data = multiqc_df_melt) + geom_tile(aes(y=variable,x=ID, fill = value)) +
+                    scale_fill_gradient2(low="blue", mid="white", high="red", 
+                                        midpoint=0.85,    
+                                        breaks=seq(0,1,0.1), 
+                                        limits=c(0.7, 1)) + 
+                    theme_bw() + labs(y = "Quality Score", x="RNA-Seq Sample") +
+                    theme(axis.text.x = element_blank()) +
+                    scale_y_discrete(labels= qc_metric[unique(multiqc_df_melt$variable)])
+
+gg_out
+```
+
+<img src="make_qc_plots_files/figure-gfm/multiqc_AA-1.png" style="display: block; margin: auto;" />
+
+``` r
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/multiqc_AA.pdf")
+ggsave(outfile,
+       gg_out, width = 10, height = 2, units = "in", device="pdf")
+```
+
+## Make MultiQC for W samples
+
+``` r
+# read in and format the multiQC file
+multiqc_file = file.path(proj_dir, 
+                    "/reference_data/multiqc_summary_table_W.tsv")
+
+multiqc_df = data.frame(fread(multiqc_file))
+colnames(multiqc_df) = c("ID", "percent_mapped", "num_mapped", "dup_rate", "percent_q30", "mb_Q30", "gc_content", 
+                         "percent_reads_passFilter", "percent_reads_wAdapter")
+
+samp_ids = unlist(lapply(multiqc_df$ID, function(x) strsplit(x, "_")[[1]][1]))
+multiqc_df$ID = samp_ids
+
+# now format it for plotting
+multiqc_df_melt = melt(multiqc_df, id="ID")
+
+# for now we only care about the percent_q30 and percent_reads_passFilter
+multiqc_df_melt = subset(multiqc_df_melt, multiqc_df_melt$variable %in% 
+                                            c("percent_q30", "percent_reads_passFilter"))
+
+
+# translate percent to numeric
+multiqc_df_melt$value = as.numeric(sub("%","",multiqc_df_melt$value))/100
+multiqc_df_melt = multiqc_df_melt
+multiqc_df_melt = multiqc_df_melt[order(multiqc_df_melt$value),]
+multiqc_df_melt$variable = droplevels(multiqc_df_melt$variable)
+
+# plot the correlation matrix as a heatmap
+qc_metric = c("Percent of Reads\nPassing FastP Filter",
+              "Percent of Bases\nWith >=Q30")
+names(qc_metric) = c("percent_reads_passFilter", "percent_q30")
+gg_out = ggplot(data = multiqc_df_melt) + geom_tile(aes(y=variable,x=ID, fill = value)) +
+                    scale_fill_gradient2(low="blue", mid="white", high="red", 
+                                        midpoint=0.85,    
+                                        breaks=seq(0,1,0.1), 
+                                        limits=c(0.7, 1)) + 
+                    theme_bw() + labs(y = "Quality Score", x="RNA-Seq Sample") +
+                    theme(axis.text.x = element_blank()) +
+                    scale_y_discrete(labels= qc_metric[unique(multiqc_df_melt$variable)])
+
+gg_out
+```
+
+<img src="make_qc_plots_files/figure-gfm/multiqc_W-1.png" style="display: block; margin: auto;" />
+
+``` r
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/multiqc_W.pdf")
+ggsave(outfile,
+       gg_out, width = 10, height = 2, units = "in", device="pdf")
+```
+
+## Make boxplots methods
+
+``` r
+read_format_expr <- function(in_file, metadata_table){
+    
+     rnaseq_expr_df = data.frame(fread(in_file))
+
+    # format it so we can add metadata
+    gene_ids = rnaseq_expr_df[,1]
+    rnaseq_expr_df = rnaseq_expr_df[,-1]
+    sample_ids = colnames(rnaseq_expr_df)
+    rnaseq_expr_df = data.frame(t(rnaseq_expr_df))
+    colnames(rnaseq_expr_df) = gene_ids
+    
+    # now add column names back so we can have annotations
+    rnaseq_expr_df$ID = gsub("Sample_", "", row.names(rnaseq_expr_df))
+    
+    full_df = merge(metadata_table, rnaseq_expr_df, by = "ID")
+    
+    return(list(full_df, gene_ids))
+}
+
+plot_boxplot_expr <- function(in_df, in_genes, metadata_table, gene_len_df, col_name_interest, 
+                              col_plot_name, title_txt, xlab_txt, ylab_txt, boxplots_only=FALSE){
+        
+    # now plot the stats
+    gene_count_df = in_df[,in_genes]
+    gene_count_df$sample_id = in_df$ID
+    gene_count_melt <- melt(gene_count_df, id.vars="sample_id")
+    colnames(gene_count_melt) = c("ID", "gene_id", "count")
+    
+    # add version tag
+    gene_count_melt = merge(gene_count_melt, metadata_table, by="ID")
+    
+    # order samples by median expression
+    sample_order_df = data.frame(median_count = apply(in_df[,in_genes], 1, median),
+                                 ID = in_df$ID)
+    sample_order_df = sample_order_df[order(sample_order_df$median_count),]
+    gene_count_melt = merge(gene_count_melt, sample_order_df)
+    gene_count_melt$ID = factor(gene_count_melt$ID, 
+                                        levels = sample_order_df$ID)
+
+    col_idx = which(colnames(gene_count_melt) == col_name_interest)
+    colnames(gene_count_melt)[col_idx] = "fill_col"
+    gg = ggplot(gene_count_melt, aes(x=as.factor(ID), y=log10(count+1), fill=as.factor(fill_col))) +
+        geom_boxplot() + theme_bw() +
+        theme(axis.text.x = element_blank()) +
+        xlab(xlab_txt) + ylab(ylab_txt) +
+            ggtitle(title_txt) +
+        labs(fill = col_plot_name) + 
+        scale_fill_manual(labels=CLUSTER_LABELS[unique(gene_count_melt$fill_col)],
+                          values=CLUSTER_COLOR[unique(gene_count_melt$fill_col)])
+
+    med_df = unique(gene_count_melt[,c("ID", "fill_col", "median_count")])
+    gg1 = ggplot(med_df, aes(x=fill_col, y=median_count, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw()  +
+            xlab(col_plot_name) + ylab("median ") +
+            labs(fill = col_plot_name) + theme(legend.position = "none") + 
+            scale_fill_manual(labels=CLUSTER_LABELS[unique(med_df$fill_col)],
+                                values=CLUSTER_COLOR[unique(med_df$fill_col)])
+    
+    # subset for the short genes only
+    gene_len_df_inter = intersect(gene_count_melt$gene_id, gene_len_df$HGNC.symbol)
+    gene_len_df_inter = subset(gene_len_df, HGNC.symbol %in% gene_len_df_inter)
+    cutoff = quantile(gene_len_df_inter$Median, 0.10)
+    gene_len_df_short = subset(gene_len_df_inter, Median < cutoff)
+    cutoff = quantile(gene_len_df_inter$Median, 0.90)
+    gene_len_df_long = subset(gene_len_df, Median > cutoff)
+
+    gene_count_melt_short = subset(gene_count_melt, gene_id %in% gene_len_df_short$HGNC.symbol)
+    gene_count_melt_short_med = gene_count_melt_short %>%
+                                    group_by(ID)%>% 
+                                    summarise(Median_short=median(count))
+    gene_count_melt_short = merge(gene_count_melt_short, gene_count_melt_short_med)
+    x_lab_gene = paste(col_plot_name, "Ngenes=", length(unique(gene_count_melt_short$gene_id)))
+    gg2 = ggplot(gene_count_melt_short, aes(x=fill_col, y=Median_short, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(x_lab_gene) + ylab("short genes median ") +
+            labs(fill = col_plot_name) + theme(legend.position = "none") + 
+            scale_fill_manual(labels=CLUSTER_LABELS[unique(gene_count_melt_short$fill_col)],
+                              values=CLUSTER_COLOR[unique(gene_count_melt_short$fill_col)])
+    
+    
+    gene_count_melt_long = subset(gene_count_melt, gene_id %in% gene_len_df_long$HGNC.symbol)
+    gene_count_melt_long_med = gene_count_melt_long %>%
+                                    group_by(ID)%>% 
+                                    summarise(Median_long=median(count))
+    gene_count_melt_long = merge(gene_count_melt_long, gene_count_melt_long_med)
+    x_lab_gene = paste(col_plot_name, "Ngenes=", length(unique(gene_count_melt_long$gene_id)))
+    gg3 = ggplot(gene_count_melt_long, aes(x=fill_col, y=Median_long, fill=as.factor(fill_col))) +
+            geom_boxplot() + theme_bw() +
+            xlab(x_lab_gene) + ylab("long genes median ") +
+            labs(fill = col_plot_name) + theme(legend.position = "none") + 
+            scale_fill_manual(labels=CLUSTER_LABELS[unique(gene_count_melt_long$fill_col)],
+                              values=CLUSTER_COLOR[unique(gene_count_melt_long$fill_col)])
+
+    flat_plot = ggarrange(gg, 
+                          ggarrange(gg1, gg2, gg3, ncol=3),
+                          nrow=2)
+    
+    return(list(flat_plot, gg))
+
+}
+
+
+
+plot_tsne_expr <- function(in_df, in_genes, metadata_table, col_name_interest, 
+                              col_plot_name, title_txt, xlab_txt, ylab_txt){
+        
+    # now plot the stats
+    gene_count_df = in_df[,gene_df$hgnc_symbol]
+
+    tsne_res = Rtsne(log10(gene_count_df+1))    
+    tsne_res = data.frame(tsne_res$Y)
+    colnames(tsne_res) = c("tsne_1", "tsne_2")
+    tsne_res$ID = in_df$ID
+    
+    
+    # add version tag
+    tsne_res = merge(tsne_res, metadata_table, by="ID")
+    
+    # add median count
+    median_count = apply(gene_count_df, 1, median)
+    tsne_res$median_rank = rank(median_count)
+
+    col_idx = which(colnames(tsne_res) == col_name_interest)
+    colnames(tsne_res)[col_idx] = "fill_col"
+    gg1 = ggplot(tsne_res, aes(x=tsne_1, y=tsne_2, color=as.factor(fill_col))) +
+        geom_point() + theme_bw()  + 
+        scale_color_manual(labels=CLUSTER_LABELS[unique(tsne_res$fill_col)],
+                           values=CLUSTER_COLOR[unique(tsne_res$fill_col)]) +
+        theme(axis.text.x = element_blank()) +
+        xlab(xlab_txt) + ylab(ylab_txt) +
+            ggtitle(title_txt) +
+        labs(color = col_plot_name)
+    
+    gg2 = ggplot(tsne_res, aes(x=tsne_1, y=tsne_2, color=median_rank)) +
+        geom_point() + theme_bw()  + 
+        theme(axis.text.x = element_blank()) +
+        xlab(xlab_txt) + ylab(ylab_txt) +
+            ggtitle(" ") +
+        labs(color = "median rank")
+
+    flat_plot = ggarrange(gg1, gg2, ncol=2, nrow = 1)
+        
+    return(list(flat_plot, gg1))
+}
+```
+
+## Make boxplots methods of raw and normalized data
+
+### this is for the Schildkraut B samples
+
+``` r
+# filter for genes used in the analysis
+gene_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+gene_df <- data.frame(fread(gene_file))
+colnames(gene_df)[1] = "hgnc_symbol"
+
+subset_cols = c(colnames(metadata_table_AA), gene_df$hgnc_symbol)
+
+
+# make raw
+raw_file = file.path(proj_dir, 
+                "/data/rna_seq_pilot_and_new/salmon_raw_counts_for_way_pipeline.tsv")
+res = read_format_expr(raw_file, metadata_table_AA)
+in_df = res[[1]]
+in_genes = res[[2]]
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "Raw count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Raw Counts +1 )")
+raw_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_unnormalized_AA.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_unnormalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+# make formatted
+in_file = file.path(proj_dir, 
+                    "/data/rna_seq_pilot_and_new/salmon_normalized_filtered_for_way_pipeline.tsv")
+res = read_format_expr(in_file, metadata_table_AA)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+###########
+## K=3 Normalized
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+###########
+## K=3 Normalized --low_qual
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "low_qual", 
+                  col_plot_name = "Low Quality Biological Samples",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/low_qual_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+###########
+## K=3 Normalized --resequenced
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "resequenced", 
+                  col_plot_name = "Resequenced",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/reseq_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+###########
+## K=3 Normalized --pilot
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "version", 
+                  col_plot_name = "Pilot or Full Study",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/pilot_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+###########
+## K=4 Normalized
+##########
+ 
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK4_kmeans", 
+                  col_plot_name = "K4_kmeans_clusters",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_rnaseq_qc_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+    
+
+###########
+## K=2 Normalized
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_rnaseq_qc_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+########################################################################################
+
+res = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "MAD Genes Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_mad_genes_rnaseq_qc_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_mad_genes_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+res = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK4_kmeans", 
+                  col_plot_name = "K4_kmeans_clusters",
+                  title = "MAD Genes Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_mad_genes_rnaseq_qc_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_mad_genes_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+res = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "MAD Genes Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_mad_genes_rnaseq_qc_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_mad_genes_rnaseq_qc_normalized_box_AA.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+
+
+
+#### TSNE
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, 
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+in_gg = res[[2]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_mad_genes_rnaseq_tsne_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 7, height = 5, units = "in", device = "pdf")
+
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, 
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+    
+in_gg = res[[2]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_mad_genes_rnaseq_tsne_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 7, height = 5, units = "in", device = "pdf")
+
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, 
+                  col_name_interest = "ClusterK4_kmeans", 
+                  col_plot_name = "K4_kmeans_clusters",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+    
+in_gg = res[[2]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_mad_genes_rnaseq_tsne_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 7, height = 5, units = "in", device = "pdf")
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_AA, 
+                  col_name_interest = "REMOVE_LOW_EXPRESSION", 
+                  col_plot_name = "Low Expr.\nRemoved\nSamples",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+in_gg = res[[1]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/lowExpr_mad_genes_rnaseq_tsne_normalized_AA.pdf")
+ggsave(outfile,
+       in_gg, width = 10, height = 5, units = "in", device = "pdf")
+```
+
+### this is for the Schildkraut W samples
+
+``` r
+# filter for genes used in the analysis
+gene_file = file.path(proj_dir, 
+                    "/data/way_pipeline_results_10removed_NeoRemoved_inclWhites/1.DataInclusion-Data-Genes/GlobalMAD_genelist.csv")
+gene_df <- data.frame(fread(gene_file))
+colnames(gene_df)[1] = "hgnc_symbol"
+
+subset_cols = c(colnames(metadata_table_W), gene_df$hgnc_symbol)
+
+
+# make raw
+raw_file = file.path(proj_dir, 
+                "/data/rna_seq_whites/salmon_raw_counts_for_way_pipeline_whites.tsv")
+res = read_format_expr(raw_file, metadata_table_W)
+in_df = res[[1]]
+in_genes = res[[2]]
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "Raw count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Raw Counts +1 )")
+raw_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_unnormalized_W.pdf")
+ggsave(outfile,
+       raw_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_unnormalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+# make formatted
+in_file = file.path(proj_dir, 
+                    "/data/rna_seq_whites/salmon_normalized_filtered_for_way_pipeline_whites.tsv")
+res = read_format_expr(in_file, metadata_table_W)
+in_df = res[[1]]
+in_genes = res[[2]]
+
+
+###########
+## K=3 Normalized
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+###########
+## K=3 Normalized --low_qual
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "low_qual", 
+                  col_plot_name = "Low Quality Biological Samples",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/low_qual_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+###########
+## K=3 Normalized --resequenced
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "resequenced", 
+                  col_plot_name = "Resequenced",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/reseq_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+###########
+## K=3 Normalized --pilot
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "version", 
+                  col_plot_name = "Pilot or Full Study",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/pilot_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+###########
+## K=4 Normalized
+##########
+ 
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK4_kmeans", 
+                  col_plot_name = "K4_kmeans_clusters",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_rnaseq_qc_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+    
+
+###########
+## K=2 Normalized
+##########
+res = plot_boxplot_expr(in_df, in_genes, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_rnaseq_qc_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+########################################################################################
+
+res = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "MAD Genes Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_mad_genes_rnaseq_qc_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_mad_genes_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+res = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK4_kmeans", 
+                  col_plot_name = "K4_kmeans_clusters",
+                  title = "MAD Genes Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_mad_genes_rnaseq_qc_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_mad_genes_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+res = plot_boxplot_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, gene_len_df,
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "MAD Genes Normalized count distribution for each sample", 
+                  xlab = "Samples", 
+                  ylab = "log10( Normalized Counts +1 )")
+in_gg = res[[1]]
+box_gg = res[[2]]
+    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_mad_genes_rnaseq_qc_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 30, height = 15, units = "in", device = "pdf")
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_mad_genes_rnaseq_qc_normalized_box_W.pdf")
+ggsave(outfile,
+       box_gg, width = 30, height = 5, units = "in", device = "pdf")
+
+
+
+
+#### TSNE
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, 
+                  col_name_interest = "ClusterK2_kmeans", 
+                  col_plot_name = "K2_kmeans_clusters",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+in_gg = res[[2]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K2_mad_genes_rnaseq_tsne_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 7, height = 5, units = "in", device = "pdf")
+
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, 
+                  col_name_interest = "ClusterK3_kmeans", 
+                  col_plot_name = "K3_kmeans_clusters",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+    
+in_gg = res[[2]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K3_mad_genes_rnaseq_tsne_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 7, height = 5, units = "in", device = "pdf")
+
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, 
+                  col_name_interest = "ClusterK4_kmeans", 
+                  col_plot_name = "K4_kmeans_clusters",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+    
+in_gg = res[[2]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/K4_mad_genes_rnaseq_tsne_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 7, height = 5, units = "in", device = "pdf")
+
+
+res = plot_tsne_expr(in_df[,subset_cols], gene_df$hgnc_symbol, metadata_table_W, 
+                  col_name_interest = "REMOVE_LOW_EXPRESSION", 
+                  col_plot_name = "Low Expr.\nRemoved\nSamples",
+                  title = "T-SNE of MAD Genes Normalized Counts", 
+                  xlab = "TSNE 1", 
+                  ylab = "TSNE 2")
+in_gg = res[[1]]    
+outfile = paste0(proj_dir, "/figure_notebooks/manuscript_figs/lowExpr_mad_genes_rnaseq_tsne_normalized_W.pdf")
+ggsave(outfile,
+       in_gg, width = 10, height = 5, units = "in", device = "pdf")
+```
