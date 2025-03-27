@@ -17,7 +17,7 @@ All clustering analyses can be re-run using Docker container for the clustering 
 
 
 ## Data Availability
-The data used in this analysis, raw and processed, will be made available upon publication.
+The processed data used in this analysis is included in the publication. Raw data will be made available through dbGaP under study ID: phs002262.v3.p1. 
 
 ## Code overview
 - `data`: This is an empty folder, once the paper is published, we will release the processed data which can be put here.
