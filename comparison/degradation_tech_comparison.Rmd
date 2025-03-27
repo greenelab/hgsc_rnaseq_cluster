@@ -1,0 +1,319 @@
+---
+title: "rna_degradation_tech_comparison"
+author: "Natalie Davidson"
+date: "5/7/2021"
+output: github_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+require(here)
+require(data.table)
+require(pheatmap)
+require(dplyr)
+require(ggplot2)
+require(ggrepel)
+require(ggcorrplot)
+require(car)
+
+proj_dir = here()
+source(file.path(proj_dir, "/comparison/utils/file_processing_utils.R"))
+source(file.path(proj_dir, "/analyze_rnaseq/plot_utils.R"))
+
+
+```
+
+## Overview
+
+This document will try to understand if there are technical factors that cause the HTA and RNA-Seq technologies to differ.
+To do this we will need the expression tables and metadata table.
+The data is located in 2 repos: [hgsc_characterization](https://github.com/greenelab/hgsc_characterization/) and [aaces_ovarian](https://github.com/greenelab/aaces_ovarian/)
+
+To re-run this analysis, it is assumed that you are in the hgsc_characterization Rproj and both repos are in a shared folder.
+
+**Expression Table file locations:**
+
+* RNA-Seq expression:
+    + repo: [hgsc_characterization](https://github.com/greenelab/hgsc_characterization/)
+    + location: `/hgsc_characterization/data/rna_seq/salmon_quant_processed/salmon_gene_quant.RDS`
+
+* HTA expression:
+    + repo: [aaces_ovarian](https://github.com/greenelab/aaces_ovarian/)
+    + location: `/aaces_ovarian/output/AACES_expression_scanned.txt`
+
+
+**Sample ID mapping**. The sample ID used to index all samples in this analysis is the **suid**.
+
+* HTA sample IDs
+    + HTA sample IDs look like: 5716_aaaaa_aaaaaa_HTA.CEL where a is 0-9.
+    + To translate HTA sample ids to **suid**: `/aaces_ovarian/data/exclusion_data.tsv`
+    
+* RNA-Seq expression:
+    + RNA-Seq sample IDs look like 18341Xaa where a is 0-9. 
+    + To translate RNA-Seq sample ids to **suid**: `/hgsc_characterization/reference_data/rna_sample_metadata.txt`
+    
+**Metadata**
+
+* Sample Type Annotation
+    + `/reference_data/RNAseq_sample_selection_subtable_removed.tsv`
+    + The sample subtype used to find sample patterns 
+    + **HGSCsubtypeFinal** and **race** are the columns of interest.
+    
+* HTA QC file
+    + `reference_data/5716_Project_Summary_HTA_qc_metrics.tsv`
+    + RNA concentration information for HTA samples
+
+* RNA QC file
+    + `reference_data/rna_sample_metadata.txt`
+    + RNA concentration information for RNA-Seq samples
+
+
+**Helper Scripts**. helper scripts + methods are listed here: 
+
+* `/hgsc_characterization/comparison/utils/file_processing_utils.R`
+    + format_nanostring_data
+    + format_hta_data
+    + format_rnaseq_data
+    + get_gene_id_map
+    
+* `/hgsc_characterization/analyze_rnaseq/plot_utils.R`
+    + display_venn
+    + plot_pca
+
+
+## Read in files
+
+```{r read_validate, fig.align='center', echo=FALSE, warning=FALSE, message=F}
+
+dirs_in_parent = list.dirs(file.path(here(), "../"), recursive = F)
+is_aaces_present = grep("aaces_ovarian", dirs_in_parent)
+if(length(is_aaces_present) == 0){
+    warning_str = "ERROR: aaces_ovarian and hgsc_characterization repos are not in shared parent folder"
+    print(warning_str)
+    stop(warning_str)
+}
+
+```
+
+### Read each data source
+
+```{r read_expr, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+# load expression data
+hta_expr_file = file.path(proj_dir, 
+                    "../aaces_ovarian/output/AACES_expression_scanned.txt")
+hta_trans_file = file.path(proj_dir,
+                           "../aaces_ovarian/data/exclusion_data.tsv")
+hta_dt = format_hta_data(hta_expr_file, hta_trans_file)
+
+
+rnaseq_expr_file = file.path(proj_dir, 
+                    "/data/rna_seq/salmon_quant_processed/salmon_gene_quant.RDS")
+
+rnaseq_trans_file = file.path(proj_dir, 
+                    "/reference_data/rna_sample_metadata.txt")
+rnaseq_dt = format_rnaseq_data(rnaseq_expr_file, rnaseq_trans_file)
+
+
+```
+
+
+### Read in the meta data
+```{r read_metadata, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+# get subtype and race annotation
+subtype_file = file.path(proj_dir, 
+                    "/reference_data/RNAseq_sample_selection_subtable_removed.tsv")
+subtype_dt = fread(subtype_file)
+subtype_dt = unique(subtype_dt[,c("suid", "HGSCsubtype", "diagyear", "race")])
+
+# get HTA RNA info
+hta_qc_file = file.path(proj_dir, 
+                    "/reference_data/5716_Project_Summary_HTA_qc_metrics.tsv")
+hta_qc_dt = fread(hta_qc_file)
+hta_qc_dt = subset(hta_qc_dt, select=c(2,3))
+colnames(hta_qc_dt) = c("suid", "hta_conc")
+
+# get RNAseq RNA info
+rna_qc_file = file.path(proj_dir, 
+                    "/reference_data/rna_sample_metadata.txt")
+rna_qc_dt = fread(rna_qc_file)
+rna_qc_dt = subset(rna_qc_dt, select=c(1,5,9))
+colnames(rna_qc_dt) = c("rna_conc", "suid", "rna_rin")
+
+
+```
+
+### Check sample overlap
+
+```{r get-samp_overlap, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+hta_suid = unique(na.omit(hta_dt$suid))
+rnaseq_suid = unique(na.omit(rnaseq_dt$suid))
+
+samp_per_tech = list(hta = hta_suid,
+                     rnaseq = rnaseq_suid)
+display_venn(samp_per_tech,
+            category.names = c("HTA", "RNA-Seq"),
+            fill = c("#D95F02", "#7570B3"),
+            main = "Sample Overlap across 2 Technologies")
+
+
+```
+
+
+## compare the data
+
+### Calculate the correlations of matched samples
+
+```{r corr_samples, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+
+# merge the expression tables together
+colnames(hta_dt)[4] = "hta_expr"
+colnames(rnaseq_dt)[4] = "rnaseq_expr"
+expr_dt = merge(hta_dt, rnaseq_dt)
+
+# to make technologies comparable scale within each sample
+expr_dt = expr_dt %>%
+            group_by(suid) %>%
+            mutate(scaled_rna_expr = scale(rnaseq_expr))
+
+expr_dt = expr_dt %>%
+            group_by(suid) %>%
+            mutate(scaled_hta_expr = scale(hta_expr))
+
+
+# calculate the correlations
+expr_corr_dt = subset(expr_dt,
+                      select = c("suid", 
+                                  "ensembl_gene_id", 
+                                  "scaled_rna_expr", 
+                                  "scaled_hta_expr")) %>%
+                group_by(suid) %>% 
+                summarise(kendall_corr = cor(scaled_rna_expr, scaled_hta_expr, method = "kendall")) 
+
+# add meta data
+expr_corr_dt = Reduce(merge, 
+                      list(expr_corr_dt, subtype_dt, hta_qc_dt, rna_qc_dt))
+
+print(expr_corr_dt)
+
+```
+
+
+### Run regression analysis
+
+```{r regression_plots, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+# plot response variable
+ggplot(expr_corr_dt, aes(x=kendall_corr)) +
+        geom_histogram(binwidth = 0.05) +
+        geom_density(aes(y=0.05 * ..count..)) + 
+        theme_bw() +  ggtitle("Distribution of Correlation btw RNASeq and HTA")
+```
+
+We find that the correlation between HTA and RNASeq samples seems to be around 0.4.
+While positive and significant, it is a bit lower than we would like.
+In the next few analyses, we would like to identify if there are systematic 
+confounders that can account for why these samples are not more correlated.
+
+```{r regression_plots_qc1, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+# run regression analysis on all info
+full_lm = lm(kendall_corr ~ hta_conc + rna_conc + diagyear + rna_rin + HGSCsubtype, 
+               na.omit(expr_corr_dt))
+summary(full_lm)
+plot(full_lm)
+
+```
+
+Above is the full regression using all confounders.
+We find that there are some outlier samples, (4, 12, 15, 18) and the overall fit is not great.
+We don't find significant coefficient in the confounders, hta_concentration seems possibly correlated.
+
+```{r regression_plots_qc2, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+# run regression analysis only using RNA QC measures
+conc_lm = lm(kendall_corr ~ hta_conc + rna_conc, expr_corr_dt)
+summary(conc_lm)
+plot(conc_lm)
+```
+
+Above is the regression with only rna and HTA concentration as additional confounders.
+The fit is much better, but 4 and 18 are still outliers.
+hta_concentration again may be a significant confounder, but more data is needed.
+
+```{r av_plots, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+ggplot(expr_corr_dt, aes(y=kendall_corr, x=hta_conc, color=rna_conc)) +
+        geom_point() + geom_smooth(method = lm) + 
+        theme_bw() + ggtitle("Sample Deviation vs. starting RNA concentration") +
+        annotate("text", label = paste("Adj R2 = ", 
+                                       signif(summary(conc_lm)$adj.r.squared, 2),
+                                       " P =",
+                                       signif(summary(conc_lm)$coef[2,4], 2)),
+                 x=8, y=0.5) +
+        xlab("HTA concentration (ng/ul)") +
+        ylab("Kendall correlation btw Technologies") +
+        scale_colour_gradient(high = "yellow", low = "red") +
+        labs(color = "RNASeq conc. (ng/ul)")
+avPlots(conc_lm)
+```
+
+Above we look individually at HTA_conc ~ Kendall_corr after RNA_conc correction (left) and
+RNA_conc ~ Kendall_corr after HTA_conc correction (right.)
+We see a stronger correlation for HTA_conc ~ Kendall_corr. 
+To visualize this in more detail, we will plot HTA_conc ~ Kendall_corr and color by RNA_conc. 
+
+
+First we color by the RNA_conc continuously, then stratified into high, mid, and low.
+This will give us a feeling of whether or not there is an interaction between RNA_conc and HTA_conc.
+
+
+```{r regression_plots1, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+ggplot(expr_corr_dt, aes(y=kendall_corr, x=hta_conc, color=rna_conc)) +
+        geom_point() + geom_smooth(method = lm) + 
+        theme_bw() + ggtitle("Sample Deviation vs. starting RNA concentration") +
+        annotate("text", label = paste("Adj R2 = ", 
+                                       signif(summary(conc_lm)$adj.r.squared, 2),
+                                       " P =",
+                                       signif(summary(conc_lm)$coef[2,4], 2)),
+                 x=8, y=0.5) +
+        xlab("HTA concentration (ng/ul)") +
+        ylab("Kendall correlation btw Technologies") +
+        scale_colour_gradient(high = "yellow", low = "red") +
+        labs(color = "RNASeq conc. (ng/ul)")
+```
+
+
+```{r regression_plots2, fig.align='center', echo=TRUE, warning=FALSE, message=F}
+
+expr_corr_dt$rna_conc_factor = "low"
+quantile_25 = quantile(expr_corr_dt$rna_conc, 0.33)
+quantile_75 = quantile(expr_corr_dt$rna_conc, 0.66)
+expr_corr_dt$rna_conc_factor[expr_corr_dt$rna_conc > quantile_25 & 
+                             expr_corr_dt$rna_conc < quantile_75] = "mid"
+expr_corr_dt$rna_conc_factor[expr_corr_dt$rna_conc >= quantile_75] = "high"
+expr_corr_dt$rna_conc_factor = factor(expr_corr_dt$rna_conc_factor, levels = c("low", "mid", "high"))
+ggplot(expr_corr_dt, aes(y=kendall_corr, x=hta_conc, color=rna_conc_factor, fill = rna_conc_factor)) +
+        geom_point() + geom_smooth(method = lm) + 
+        theme_bw() + ggtitle("Sample Deviation vs. starting RNA concentration") +
+        annotate("text", label = paste("Adj R2 = ", 
+                                       signif(summary(conc_lm)$adj.r.squared, 2),
+                                       " P =",
+                                       signif(summary(conc_lm)$coef[2,4], 2)),
+                 x=8, y=0.5) +
+        xlab("HTA concentration (ng/ul)") +
+        ylab("Kendall correlation btw Technologies") +
+        labs(color = "RNASeq conc. (ng/ul)", fill = "RNASeq conc. (ng/ul)")
+
+
+
+```
+
+Once we have all samples we can do a real interaction test.
+For now, from visual inspection, we see that if RNA_conc is high, then there isn't a strong correlation between HTA_conc and sample deviation -- indicating that if you have a high level of RNA_conc then HTA_conc alone is not enough to explain the sample deviation. 
+So if you have low concentration in either protocol you will have large deviation between the two samples.
+If you have enough concentration in at least one protocol, there are other reasons for low correlation between samples, but we don't have enough samples to really pin down what the reasons are.
